@@ -33,6 +33,7 @@ public class MilvusConfig {
                     .withPort(port > 0 ? port : 19530)
                     .withDatabaseName(database != null ? database : "default")
                     .withIdleTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+                    .withConnectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
                     .build();
 
             this.milvusClient = new MilvusServiceClient(connectParam);

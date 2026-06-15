@@ -15,7 +15,7 @@ public class EmbeddingConfig {
     /**
      * 模型 API 基础地址
      */
-    private String baseUrl = "https://api.xiaomi.com/v1";
+    private String baseUrl = "https://api.openai.com/v1";
 
     /**
      * API 密钥

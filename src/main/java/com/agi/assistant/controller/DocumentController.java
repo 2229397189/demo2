@@ -54,28 +54,52 @@ public class DocumentController {
     @GetMapping("/{id}")
     @Operation(summary = "文档详情", description = "获取指定文档的详细信息")
     public Result<Document> getDocument(
-            @Parameter(description = "文档ID") @PathVariable("id") Long documentId) {
-        log.info("Get document {}", documentId);
-        Document document = documentService.getDocument(documentId);
+            @Parameter(description = "文档ID") @PathVariable("id") String documentId) {
+        Long id = parseId(documentId);
+        if (id == null) {
+            return Result.fail(400, "Invalid document ID: " + documentId);
+        }
+        log.info("Get document {}", id);
+        Document document = documentService.getDocument(id);
         return Result.ok(document);
     }
 
     @DeleteMapping("/{id}")
     @Operation(summary = "删除文档", description = "删除指定的文档")
     public Result<Void> deleteDocument(
-            @Parameter(description = "文档ID") @PathVariable("id") Long documentId,
+            @Parameter(description = "文档ID") @PathVariable("id") String documentId,
             @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId) {
-        log.info("Delete document {} by user {}", documentId, userId);
-        documentService.deleteDocument(documentId, userId);
+        Long id = parseId(documentId);
+        if (id == null) {
+            log.warn("Invalid document ID in delete request: {}", documentId);
+            return Result.fail(400, "Invalid document ID: " + documentId);
+        }
+        log.info("Delete document {} by user {}", id, userId);
+        documentService.deleteDocument(id, userId);
         return Result.ok();
     }
 
     @PostMapping("/{id}/process")
     @Operation(summary = "处理文档", description = "触发文档的解析、分块、向量化和索引流程")
     public Result<Void> processDocument(
-            @Parameter(description = "文档ID") @PathVariable("id") Long documentId) {
-        log.info("Process document {}", documentId);
-        documentService.processDocument(documentId);
+            @Parameter(description = "文档ID") @PathVariable("id") String documentId) {
+        Long id = parseId(documentId);
+        if (id == null) {
+            return Result.fail(400, "Invalid document ID: " + documentId);
+        }
+        log.info("Process document {}", id);
+        documentService.processDocument(id);
         return Result.ok();
+    }
+
+    private Long parseId(String idStr) {
+        if (idStr == null || idStr.isBlank() || "undefined".equals(idStr) || "null".equals(idStr)) {
+            return null;
+        }
+        try {
+            return Long.parseLong(idStr);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 }

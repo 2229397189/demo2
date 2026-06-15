@@ -354,9 +354,10 @@ public class BM25Service {
 
             return parseSearchResponse(response);
 
-        } catch (IOException e) {
-            log.error("BM25 search failed for query [{}]: {}", query, e.getMessage(), e);
-            throw new RuntimeException("BM25 search failed", e);
+        } catch (Exception e) {
+            // Index not found or ES unavailable — degrade gracefully
+            log.warn("BM25 search unavailable for query [{}]: {}", query, e.getMessage());
+            return Collections.emptyList();
         }
     }
 

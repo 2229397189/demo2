@@ -136,8 +136,13 @@ public class EmbeddingService {
             return parseEmbeddingResponse(responseJson);
 
         } catch (Exception e) {
-            log.error("Embedding request failed: {}", e.getMessage(), e);
-            throw new RuntimeException("Failed to get embeddings: " + e.getMessage(), e);
+            log.warn("Embedding API unavailable, returning empty vectors: {}", e.getMessage());
+            // Return empty vectors for each input text so callers can degrade gracefully
+            List<List<Float>> fallback = new ArrayList<>();
+            for (int i = 0; i < texts.size(); i++) {
+                fallback.add(Collections.emptyList());
+            }
+            return fallback;
         }
     }
 

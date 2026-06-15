@@ -134,7 +134,7 @@ public class ChatServiceImpl implements ChatService {
             );
 
             streamingWebClient.post()
-                    .uri("/v1/chat/completions")
+                    .uri("/chat/completions")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(requestBody)
                     .retrieve()
@@ -262,16 +262,30 @@ public class ChatServiceImpl implements ChatService {
             return;
         }
 
-        // Handle SSE format: lines starting with "data: "
+        // WebClient strips "data: " prefix, so chunk may be raw JSON or SSE format
         for (String line : chunk.split("\n")) {
             line = line.trim();
-            if (line.isEmpty() || !line.startsWith("data: ")) {
+            if (line.isEmpty()) {
                 continue;
             }
 
-            String data = line.substring(6).trim();
+            // Strip "data: " prefix if present
+            String data;
+            if (line.startsWith("data: ")) {
+                data = line.substring(6).trim();
+            } else if (line.startsWith("data:")) {
+                data = line.substring(5).trim();
+            } else {
+                data = line;
+            }
+
             if (data.equals("[DONE]")) {
                 return;
+            }
+
+            // Skip non-JSON lines
+            if (!data.startsWith("{")) {
+                continue;
             }
 
             try {
@@ -279,9 +293,11 @@ public class ChatServiceImpl implements ChatService {
                 JsonNode choices = root.path("choices");
                 if (choices.isArray() && choices.size() > 0) {
                     JsonNode delta = choices.get(0).path("delta");
-                    JsonNode contentNode = delta.path("content");
-                    if (!contentNode.isMissingNode() && contentNode.asText() != null) {
-                        String content = contentNode.asText();
+
+                    // Extract content: only use "content" (skip "reasoning_content" which is internal thinking)
+                    String content = extractTextContent(delta.path("content"));
+
+                    if (content != null) {
                         fullResponse.get().append(content);
                         emitter.send(SseEmitter.event()
                                 .name("content")
@@ -356,6 +372,21 @@ public class ChatServiceImpl implements ChatService {
         }
 
         return messages;
+    }
+
+    /**
+     * Extract text content from a JSON node.
+     * Returns null for missing, null, empty, or non-text nodes.
+     */
+    private String extractTextContent(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isTextual()) {
+            return null;
+        }
+        String text = node.asText();
+        return (text != null && !text.isEmpty()) ? text : null;
     }
 
     private String truncate(String text, int maxLen) {

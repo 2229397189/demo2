@@ -8,7 +8,7 @@ spring:
   # MySQL
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/agi_assistant?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://localhost:3306/agi_assistant?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:123456}
     hikari:
@@ -19,6 +19,13 @@ spring:
       connection-timeout: 5000
       pool-name: AgiAssistantHikariPool
       initialization-fail-timeout: 0
+
+  # Auto-run SQL init on first startup
+  sql:
+    init:
+      mode: always
+      schema-locations: file:sql/init.sql
+      continue-on-error: true
 
   # Redis
   data:
@@ -109,15 +116,22 @@ neo4j:
   max-connection-pool-size: 100
   connection-acquisition-timeout: 60
 
-# OpenAI Compatible API
+# OpenAI Compatible API (Xiaomi MiMo)
 openai:
-  base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
-  api-key: ${OPENAI_API_KEY:sk-placeholder}
-  model: ${OPENAI_MODEL:gpt-4o}
+  base-url: ${OPENAI_BASE_URL:https://token-plan-cn.xiaomimimo.com/v1}
+  api-key: ${OPENAI_API_KEY:tp-crgjc0kfps3xfd0l15tvxha7lln0swbspfu6bc2zt5bac0u0}
+  model: ${OPENAI_MODEL:mimo-v2.5-pro}
   max-tokens: ${OPENAI_MAX_TOKENS:4096}
   temperature: ${OPENAI_TEMPERATURE:0.7}
   timeout: ${OPENAI_TIMEOUT:120}
   connect-timeout: ${OPENAI_CONNECT_TIMEOUT:30}
+
+# Embedding API (Xiaomi MiMo)
+embedding:
+  base-url: ${EMBEDDING_BASE_URL:https://token-plan-cn.xiaomimimo.com/v1}
+  api-key: ${EMBEDDING_API_KEY:tp-crgjc0kfps3xfd0l15tvxha7lln0swbspfu6bc2zt5bac0u0}
+  model: ${EMBEDDING_MODEL:text-embedding-3-small}
+  dimensions: ${EMBEDDING_DIMENSIONS:1024}
 
 # Sandbox Docker Configuration
 sandbox:
