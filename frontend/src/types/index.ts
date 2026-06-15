@@ -29,12 +29,15 @@ export interface ChatMessage {
 }
 
 export interface SourceReference {
-  id: string
+  id?: string
   documentId: string
   documentName: string
   content: string
   score: number
   chunkIndex: number
+  // Backend SearchResult fields
+  title?: string
+  source?: string
 }
 
 export interface ChatRequest {

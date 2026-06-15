@@ -30,7 +30,7 @@ public class DocumentController {
             @Parameter(description = "文档标题") @RequestParam(required = false) String title,
             @Parameter(description = "标签") @RequestParam(required = false) String tags,
             @Parameter(description = "来源") @RequestParam(required = false) String source,
-            @Parameter(description = "用户ID") @RequestHeader("X-User-Id") Long userId) {
+            @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId) {
         log.info("Upload document by user {}, fileName {}", userId, file.getOriginalFilename());
         DocumentUploadRequest request = new DocumentUploadRequest();
         request.setTitle(title);
@@ -43,7 +43,7 @@ public class DocumentController {
     @GetMapping
     @Operation(summary = "文档列表", description = "分页获取用户的文档列表")
     public Result<PageResult<Document>> listDocuments(
-            @Parameter(description = "用户ID") @RequestHeader("X-User-Id") Long userId,
+            @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId,
             @Parameter(description = "页码") @RequestParam(defaultValue = "1") int page,
             @Parameter(description = "每页数量") @RequestParam(defaultValue = "10") int size) {
         log.info("List documents for user {}, page {}, size {}", userId, page, size);
@@ -64,7 +64,7 @@ public class DocumentController {
     @Operation(summary = "删除文档", description = "删除指定的文档")
     public Result<Void> deleteDocument(
             @Parameter(description = "文档ID") @PathVariable("id") Long documentId,
-            @Parameter(description = "用户ID") @RequestHeader("X-User-Id") Long userId) {
+            @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId) {
         log.info("Delete document {} by user {}", documentId, userId);
         documentService.deleteDocument(documentId, userId);
         return Result.ok();

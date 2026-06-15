@@ -27,7 +27,7 @@ public class BenchmarkDataset {
     private final ObjectMapper objectMapper;
 
     /** 数据集缓存：datasetId → GoldenQuery 列表 */
-    private final Map<Long, List<GoldenQuery>> datasetCache = new ConcurrentHashMap<>();
+    private final Map<String, List<GoldenQuery>> datasetCache = new ConcurrentHashMap<>();
 
     /** 自增 ID 生成器 */
     private final AtomicLong idGenerator = new AtomicLong(1);
@@ -43,7 +43,7 @@ public class BenchmarkDataset {
      * @param datasetId 数据集 ID
      * @return 数据集中的 GoldenQuery 列表
      */
-    public List<GoldenQuery> loadDataset(Long datasetId) {
+    public List<GoldenQuery> loadDataset(String datasetId) {
         if (datasetId == null) {
             log.warn("Null datasetId, returning empty list");
             return List.of();
@@ -60,7 +60,7 @@ public class BenchmarkDataset {
      * @param datasetId 数据集 ID
      * @return GoldenQuery 列表
      */
-    public List<GoldenQuery> getGoldenQueries(Long datasetId) {
+    public List<GoldenQuery> getGoldenQueries(String datasetId) {
         return loadDataset(datasetId);
     }
 
@@ -75,7 +75,7 @@ public class BenchmarkDataset {
      * @param category       分类
      * @return 创建的 GoldenQuery
      */
-    public GoldenQuery addGoldenQuery(Long datasetId, String query, String expectedAnswer,
+    public GoldenQuery addGoldenQuery(String datasetId, String query, String expectedAnswer,
                                        String relevantDocIds, String difficulty, String category) {
         GoldenQuery goldenQuery = new GoldenQuery();
         goldenQuery.setId(idGenerator.getAndIncrement());
@@ -101,7 +101,7 @@ public class BenchmarkDataset {
      * @param datasetId   数据集 ID
      * @param goldenQueries GoldenQuery 列表
      */
-    public void addGoldenQueries(Long datasetId, List<GoldenQuery> goldenQueries) {
+    public void addGoldenQueries(String datasetId, List<GoldenQuery> goldenQueries) {
         if (goldenQueries == null || goldenQueries.isEmpty()) {
             return;
         }
@@ -127,7 +127,7 @@ public class BenchmarkDataset {
      * @param datasetId 数据集 ID
      * @return 统计信息字符串
      */
-    public String getDatasetStats(Long datasetId) {
+    public String getDatasetStats(String datasetId) {
         List<GoldenQuery> queries = datasetCache.getOrDefault(datasetId, List.of());
         if (queries.isEmpty()) {
             return "Dataset [" + datasetId + "]: empty";
@@ -141,7 +141,7 @@ public class BenchmarkDataset {
                 .filter(q -> q.getCategory() != null)
                 .collect(Collectors.groupingBy(GoldenQuery::getCategory, Collectors.counting()));
 
-        return String.format("Dataset [%d]: %d queries, difficulties=%s, categories=%s",
+        return String.format("Dataset [%s]: %d queries, difficulties=%s, categories=%s",
                 datasetId, queries.size(), byDifficulty, byCategory);
     }
 
@@ -150,7 +150,7 @@ public class BenchmarkDataset {
      *
      * @return 数据集 ID 集合
      */
-    public Set<Long> listDatasetIds() {
+    public Set<String> listDatasetIds() {
         return Collections.unmodifiableSet(datasetCache.keySet());
     }
 
@@ -160,7 +160,7 @@ public class BenchmarkDataset {
      * @param datasetId 数据集 ID
      * @return 是否成功删除
      */
-    public boolean deleteDataset(Long datasetId) {
+    public boolean deleteDataset(String datasetId) {
         List<GoldenQuery> removed = datasetCache.remove(datasetId);
         if (removed != null) {
             log.info("Deleted dataset [{}] with {} queries", datasetId, removed.size());
@@ -204,7 +204,7 @@ public class BenchmarkDataset {
      * 初始化示例数据集。
      */
     private void initSampleDataset() {
-        long sampleDatasetId = 1L;
+        String sampleDatasetId = "sample-dataset";
         addGoldenQuery(sampleDatasetId,
                 "什么是 RAG（检索增强生成）？",
                 "RAG 是一种结合检索和生成的 AI 技术，通过从知识库中检索相关信息来增强大语言模型的回答质量。",

@@ -29,7 +29,7 @@ public class EvaluationController {
     @Operation(summary = "创建评测任务", description = "创建一个新的RAG评测任务")
     public Result<EvaluationTask> createTask(
             @Valid @RequestBody EvaluationTaskRequest request,
-            @Parameter(description = "用户ID") @RequestHeader("X-User-Id") Long userId) {
+            @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId) {
         log.info("Create evaluation task for user {}, name {}", userId, request.getName());
         EvaluationTask task = evaluationService.createTask(request, userId);
         return Result.ok(task);
@@ -38,7 +38,7 @@ public class EvaluationController {
     @GetMapping("/tasks")
     @Operation(summary = "评测任务列表", description = "获取当前用户的评测任务列表")
     public Result<List<EvaluationTask>> listTasks(
-            @Parameter(description = "用户ID") @RequestHeader("X-User-Id") Long userId) {
+            @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId) {
         log.info("List evaluation tasks for user {}", userId);
         List<EvaluationTask> tasks = evaluationService.listTasks(userId);
         return Result.ok(tasks);

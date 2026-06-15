@@ -7,7 +7,7 @@ public class EvaluationTaskRequest {
 
     private String name;
 
-    private Long datasetId;
+    private String datasetId;
 
     private String retrievalStrategy;
 

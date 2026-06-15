@@ -7,9 +7,9 @@
     </div>
     <el-collapse-transition>
       <div v-show="expanded" class="source-list">
-        <div v-for="source in sources" :key="source.id" class="source-item">
+        <div v-for="(source, idx) in sources" :key="source.id || idx" class="source-item">
           <div class="source-info">
-            <el-tag size="small" type="info">{{ source.documentName }}</el-tag>
+            <el-tag size="small" type="info">{{ source.documentName || source.title || '未知文档' }}</el-tag>
             <el-tag size="small" type="success">相似度: {{ (source.score * 100).toFixed(1) }}%</el-tag>
             <span class="chunk-index">段落 #{{ source.chunkIndex + 1 }}</span>
           </div>

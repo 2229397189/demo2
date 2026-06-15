@@ -115,20 +115,24 @@ public class MemoryServiceImpl implements MemoryService {
         UserProfileDTO profile = new UserProfileDTO();
         profile.setUserId(userId);
 
+        // Set total memories and average importance from profile data
         if (profileData.containsKey("totalMemories")) {
-            int total = ((Number) profileData.get("totalMemories")).intValue();
-            profile.setTopics(new ArrayList<>());
-
-            // Extract topics from memories by type
-            Map<String, List<String>> byType = (Map<String, List<String>>)
-                    profileData.getOrDefault("memoriesByType", Map.of());
-            List<String> topics = new ArrayList<>(byType.keySet());
-            profile.setTopics(topics);
+            profile.setTotalMemories(((Number) profileData.get("totalMemories")).intValue());
+        }
+        if (profileData.containsKey("averageImportance")) {
+            profile.setAverageImportance(((Number) profileData.get("averageImportance")).doubleValue());
+        }
+        if (profileData.containsKey("topAccessedMemories")) {
+            profile.setTopAccessedMemories((List<String>) profileData.get("topAccessedMemories"));
         }
 
-        // Set knowledge level based on memory types and counts
+        // Extract topics and memoriesByType
         Map<String, List<String>> byType = (Map<String, List<String>>)
                 profileData.getOrDefault("memoriesByType", Map.of());
+        profile.setMemoriesByType(byType);
+        profile.setTopics(new ArrayList<>(byType.keySet()));
+
+        // Set knowledge level based on memory types and counts
         profile.setKnowledgeLevel(new java.util.HashMap<>());
         for (Map.Entry<String, List<String>> entry : byType.entrySet()) {
             String level = entry.getValue().size() > 10 ? "advanced"
@@ -136,7 +140,8 @@ public class MemoryServiceImpl implements MemoryService {
             profile.getKnowledgeLevel().put(entry.getKey(), level);
         }
 
-        log.debug("Built user profile for user [{}]: topics={}", userId, profile.getTopics());
+        log.debug("Built user profile for user [{}]: topics={}, totalMemories={}",
+                userId, profile.getTopics(), profile.getTotalMemories());
         return profile;
     }
 }

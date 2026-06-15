@@ -23,4 +23,24 @@ public class UserProfileDTO {
      * 用户偏好设置
      */
     private Map<String, Object> preferences;
+
+    /**
+     * 总记忆数
+     */
+    private int totalMemories;
+
+    /**
+     * 平均重要性评分
+     */
+    private double averageImportance;
+
+    /**
+     * 高频访问的记忆内容
+     */
+    private List<String> topAccessedMemories;
+
+    /**
+     * 按类型分组的记忆内容
+     */
+    private Map<String, List<String>> memoriesByType;
 }

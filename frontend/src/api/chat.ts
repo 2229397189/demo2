@@ -1,5 +1,5 @@
 import request from '@/utils/request'
-import type { Result, ChatSession, ChatMessage } from '@/types'
+import type { Result, ChatSession, ChatMessage, ChatRequest, SourceReference } from '@/types'
 
 export function listSessions(): Promise<Result<ChatSession[]>> {
   return request.get('/chat/sessions')
@@ -21,7 +21,8 @@ export function streamChat(
   req: ChatRequest,
   onMessage: (chunk: string) => void,
   onDone: () => void,
-  onError: (error: Error) => void
+  onError: (error: Error) => void,
+  onSource?: (sources: SourceReference[]) => void
 ): () => void {
   const controller = new AbortController()
   const userId = localStorage.getItem('userId') || '1'
@@ -66,15 +67,20 @@ export function streamChat(
             return
           }
 
+          // Skip event: lines (informational only)
+          if (trimmed.startsWith('event:')) continue
+
           // Handle data lines (may follow an event: line)
           if (trimmed.startsWith('data:')) {
             const data = trimmed.slice(5).trim()
             if (!data) continue
             try {
               const parsed = JSON.parse(data)
-              // Handle ChatStreamEvent format: { type: "content", content: "..." }
+              // Handle ChatStreamEvent format: { type: "...", content: ... }
               if (parsed.type === 'content' && parsed.content) {
                 onMessage(parsed.content)
+              } else if (parsed.type === 'source' && parsed.content && onSource) {
+                onSource(parsed.content)
               } else if (parsed.type === 'done') {
                 onDone()
                 return

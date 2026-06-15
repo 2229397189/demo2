@@ -142,13 +142,24 @@ export const useChatStore = defineStore('chat', () => {
         const session = sessions.value.find(s => s.id === currentSession.value?.id)
         if (session) {
           session.updatedAt = new Date().toISOString()
-          session.messageCount += 2
+          session.messageCount = (session.messageCount || 0) + 2
         }
       },
       (error: Error) => {
         isStreaming.value = false
         assistantMessage.content += '\n\n[流式响应中断: ' + error.message + ']'
         console.error('Stream error:', error)
+      },
+      (sources: SourceReference[]) => {
+        // Map backend SearchResult fields to SourceReference
+        streamSources.value = sources.map((s: any) => ({
+          id: s.id,
+          documentId: s.documentId || '',
+          documentName: s.documentName || s.title || '',
+          content: s.content || '',
+          score: s.score || 0,
+          chunkIndex: s.chunkIndex || 0,
+        }))
       }
     )
   }

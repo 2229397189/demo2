@@ -14,7 +14,7 @@ public class GoldenQuery {
     @TableId(type = IdType.AUTO)
     private Long id;
 
-    private Long datasetId;
+    private String datasetId;
 
     private String query;
 

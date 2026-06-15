@@ -18,7 +18,7 @@ public class EvaluationTask {
 
     private String name;
 
-    private Long datasetId;
+    private String datasetId;
 
     private String retrievalStrategy;
 
