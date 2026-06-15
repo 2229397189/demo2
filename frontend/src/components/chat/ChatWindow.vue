@@ -1,0 +1,115 @@
+<template>
+  <div class="chat-window" ref="chatContainer">
+    <div v-if="messages.length === 0" class="empty-state">
+      <el-empty description="开始新的对话吧">
+        <template #image>
+          <div style="font-size: 64px; color: #c0c4cc">
+            <el-icon><ChatDotRound /></el-icon>
+          </div>
+        </template>
+      </el-empty>
+    </div>
+    <div v-else class="message-list">
+      <MessageBubble
+        v-for="msg in messages"
+        :key="msg.id"
+        :message="msg"
+      />
+      <div v-if="isStreaming" class="typing-indicator">
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, watch, nextTick } from 'vue'
+import { ChatDotRound } from '@element-plus/icons-vue'
+import type { ChatMessage } from '@/types'
+import MessageBubble from './MessageBubble.vue'
+
+const props = defineProps<{
+  messages: ChatMessage[]
+  isStreaming: boolean
+}>()
+
+const chatContainer = ref<HTMLElement>()
+
+watch(
+  () => props.messages.length,
+  () => {
+    nextTick(() => {
+      if (chatContainer.value) {
+        chatContainer.value.scrollTop = chatContainer.value.scrollHeight
+      }
+    })
+  }
+)
+
+watch(
+  () => props.isStreaming,
+  () => {
+    nextTick(() => {
+      if (chatContainer.value) {
+        chatContainer.value.scrollTop = chatContainer.value.scrollHeight
+      }
+    })
+  }
+)
+</script>
+
+<style scoped>
+.chat-window {
+  height: 100%;
+  overflow-y: auto;
+  padding: 16px;
+  scroll-behavior: smooth;
+}
+
+.empty-state {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.typing-indicator {
+  display: flex;
+  gap: 4px;
+  padding: 16px;
+  padding-left: 64px;
+}
+
+.typing-indicator span {
+  width: 8px;
+  height: 8px;
+  background: #409eff;
+  border-radius: 50%;
+  animation: bounce 1.4s infinite ease-in-out;
+}
+
+.typing-indicator span:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.typing-indicator span:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes bounce {
+  0%, 80%, 100% {
+    transform: scale(0);
+  }
+  40% {
+    transform: scale(1);
+  }
+}
+</style>

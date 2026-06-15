@@ -1,0 +1,149 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: agi-assistant
+
+  # MySQL
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/agi_assistant?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+    hikari:
+      minimum-idle: 5
+      maximum-pool-size: 20
+      idle-timeout: 30000
+      max-lifetime: 1800000
+      connection-timeout: 5000
+      pool-name: AgiAssistantHikariPool
+      initialization-fail-timeout: 0
+
+  # Redis
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      database: 0
+      timeout: 5000
+      lettuce:
+        pool:
+          max-active: 20
+          max-idle: 10
+          min-idle: 5
+          max-wait: -1
+        shutdown-timeout: 100ms
+
+  # Kafka
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      retries: 3
+      acks: all
+    consumer:
+      group-id: agi-assistant-group
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+    listener:
+      ack-mode: manual_immediate
+      concurrency: 3
+      missing-topics-fatal: false
+
+  # Jackson
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+  # Servlet
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 100MB
+
+# MyBatis-Plus
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: com.agi.assistant.entity
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+      table-prefix: t_
+    banner: false
+  configuration:
+    map-underscore-to-camel-case: true
+    cache-enabled: true
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
+
+# Milvus
+milvus:
+  host: ${MILVUS_HOST:localhost}
+  port: ${MILVUS_PORT:19530}
+  database: ${MILVUS_DATABASE:default}
+  collection-prefix: agi_
+
+# Elasticsearch
+spring.elasticsearch:
+  uris: ${ELASTICSEARCH_URIS:localhost:9200}
+  username: ${ELASTICSEARCH_USERNAME:}
+  password: ${ELASTICSEARCH_PASSWORD:}
+  connection-timeout: 5000
+  socket-timeout: 60000
+
+# Neo4j
+neo4j:
+  uri: bolt://localhost:7687
+  authentication:
+    username: ${NEO4J_USERNAME:neo4j}
+    password: ${NEO4J_PASSWORD:neo4j}
+  max-connection-pool-size: 100
+  connection-acquisition-timeout: 60
+
+# OpenAI Compatible API
+openai:
+  base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+  api-key: ${OPENAI_API_KEY:sk-placeholder}
+  model: ${OPENAI_MODEL:gpt-4o}
+  max-tokens: ${OPENAI_MAX_TOKENS:4096}
+  temperature: ${OPENAI_TEMPERATURE:0.7}
+  timeout: ${OPENAI_TIMEOUT:120}
+  connect-timeout: ${OPENAI_CONNECT_TIMEOUT:30}
+
+# Sandbox Docker Configuration
+sandbox:
+  docker:
+    host: ${DOCKER_HOST:unix:///var/run/docker.sock}
+    image-python: ${SANDBOX_PYTHON_IMAGE:python:3.11-slim}
+    image-node: ${SANDBOX_NODE_IMAGE:node:20-slim}
+    image-java: ${SANDBOX_JAVA_IMAGE:eclipse-temurin:17-jdk}
+    timeout-seconds: ${SANDBOX_TIMEOUT:60}
+    memory-limit: ${SANDBOX_MEMORY:512m}
+    cpu-limit: ${SANDBOX_CPU:1.0}
+    network-disabled: true
+    read-only-root-fs: true
+    tmpfs-size: 256m
+
+# SpringDoc OpenAPI
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+    enabled: true
+  swagger-ui:
+    path: /swagger-ui.html
+    enabled: true
+    tags-sorter: alpha
+    operations-sorter: method
+  group-configs:
+    - group: default
+      display-name: AGI Assistant API
+      paths-to-match: /api/v1/**
