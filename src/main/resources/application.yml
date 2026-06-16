@@ -126,11 +126,11 @@ openai:
   timeout: ${OPENAI_TIMEOUT:120}
   connect-timeout: ${OPENAI_CONNECT_TIMEOUT:30}
 
-# Embedding API (Xiaomi MiMo)
+# Embedding API (Alibaba DashScope)
 embedding:
-  base-url: ${EMBEDDING_BASE_URL:https://token-plan-cn.xiaomimimo.com/v1}
-  api-key: ${EMBEDDING_API_KEY:tp-crgjc0kfps3xfd0l15tvxha7lln0swbspfu6bc2zt5bac0u0}
-  model: ${EMBEDDING_MODEL:text-embedding-3-small}
+  base-url: ${EMBEDDING_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+  api-key: ${EMBEDDING_API_KEY:sk-6401f0f4f27b4016b2e92d99c9447bf3}
+  model: ${EMBEDDING_MODEL:text-embedding-v3}
   dimensions: ${EMBEDDING_DIMENSIONS:1024}
 
 # Sandbox Docker Configuration

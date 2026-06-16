@@ -124,6 +124,7 @@ public class ChatServiceImpl implements ChatService {
 
             // 5. Stream response from LLM
             AtomicReference<StringBuilder> fullResponse = new AtomicReference<>(new StringBuilder());
+            java.util.concurrent.atomic.AtomicBoolean emitterCompleted = new java.util.concurrent.atomic.AtomicBoolean(false);
 
             Map<String, Object> requestBody = Map.of(
                     "model", openAIConfig.getModel(),
@@ -148,33 +149,37 @@ public class ChatServiceImpl implements ChatService {
                     })
                     .doOnError(e -> {
                         log.error("Stream error: {}", e.getMessage(), e);
-                        try {
-                            emitter.send(SseEmitter.event()
-                                    .name("error")
-                                    .data("Stream error: " + e.getMessage()));
-                        } catch (IOException ignored) {
+                        if (emitterCompleted.compareAndSet(false, true)) {
+                            try {
+                                emitter.send(SseEmitter.event()
+                                        .name("error")
+                                        .data("Stream error: " + e.getMessage()));
+                            } catch (IOException ignored) {
+                            }
+                            emitter.completeWithError(e);
                         }
-                        emitter.completeWithError(e);
                     })
                     .doOnComplete(() -> {
-                        try {
-                            // Save assistant message
-                            String assistantContent = fullResponse.get().toString();
-                            if (!assistantContent.isEmpty()) {
-                                ChatMessage assistantMessage = new ChatMessage();
-                                assistantMessage.setSessionId(sessionId);
-                                assistantMessage.setRole("assistant");
-                                assistantMessage.setContent(assistantContent);
-                                assistantMessage.setCreatedAt(LocalDateTime.now());
-                                chatMessageMapper.insert(assistantMessage);
-                            }
+                        if (emitterCompleted.compareAndSet(false, true)) {
+                            try {
+                                // Save assistant message
+                                String assistantContent = fullResponse.get().toString();
+                                if (!assistantContent.isEmpty()) {
+                                    ChatMessage assistantMessage = new ChatMessage();
+                                    assistantMessage.setSessionId(sessionId);
+                                    assistantMessage.setRole("assistant");
+                                    assistantMessage.setContent(assistantContent);
+                                    assistantMessage.setCreatedAt(LocalDateTime.now());
+                                    chatMessageMapper.insert(assistantMessage);
+                                }
 
-                            // Send [DONE] marker (OpenAI SSE convention)
-                            emitter.send("data: [DONE]\n\n");
-                            emitter.complete();
-                        } catch (Exception e) {
-                            log.error("Error completing stream: {}", e.getMessage(), e);
-                            emitter.complete();
+                                // Send [DONE] marker (OpenAI SSE convention)
+                                emitter.send("data: [DONE]\n\n");
+                                emitter.complete();
+                            } catch (Exception e) {
+                                log.error("Error completing stream: {}", e.getMessage(), e);
+                                try { emitter.complete(); } catch (Exception ignored) {}
+                            }
                         }
                     })
                     .subscribe();
