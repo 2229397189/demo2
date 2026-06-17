@@ -5,12 +5,16 @@ import com.agi.assistant.mapper.ChatMessageMapper;
 import com.agi.assistant.mapper.ChatSessionMapper;
 import com.agi.assistant.model.dto.ChatRequest;
 import com.agi.assistant.model.dto.ChatStreamEvent;
+import com.agi.assistant.model.dto.SandboxExecuteRequest;
+import com.agi.assistant.model.dto.SandboxExecuteResponse;
 import com.agi.assistant.model.entity.ChatMessage;
 import com.agi.assistant.model.entity.ChatSession;
 import com.agi.assistant.model.entity.SearchResult;
 import com.agi.assistant.service.ChatService;
+import com.agi.assistant.service.SandboxService;
 import com.agi.assistant.service.memory.ContextAssembly;
 import com.agi.assistant.service.rag.HybridRetrievalService;
+import com.agi.assistant.service.rag.WebSearchService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,24 +26,35 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import reactor.core.publisher.Flux;
+
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-/**
- * ChatService implementation.
- * <p>
- * Provides streaming chat via SSE, backed by OpenAI-compatible API,
- * with RAG retrieval and memory context assembly.
- */
 @Slf4j
 @Service
 @Lazy
 public class ChatServiceImpl implements ChatService {
+
+    private static final Pattern CODE_BLOCK_PATTERN = Pattern.compile(
+            "```(python|javascript|java|py|js)\\s*\\n([\\s\\S]*?)```",
+            Pattern.CASE_INSENSITIVE);
+
+    private static final List<String> SEARCH_KEYWORDS = List.of(
+            "搜索", "查找", "最新", "新闻", "search", "latest", "news",
+            "今天", "今日", "最近", "现在", "目前", "什么是", "谁是",
+            "天气", "股价", "汇率", "实时"
+    );
 
     private final ChatSessionMapper chatSessionMapper;
     private final ChatMessageMapper chatMessageMapper;
@@ -48,6 +63,8 @@ public class ChatServiceImpl implements ChatService {
     private final OpenAIConfig openAIConfig;
     private final ObjectMapper objectMapper;
     private final WebClient streamingWebClient;
+    private final WebSearchService webSearchService;
+    private final SandboxService sandboxService;
 
     public ChatServiceImpl(ChatSessionMapper chatSessionMapper,
                            ChatMessageMapper chatMessageMapper,
@@ -55,7 +72,9 @@ public class ChatServiceImpl implements ChatService {
                            ContextAssembly contextAssembly,
                            OpenAIConfig openAIConfig,
                            ObjectMapper objectMapper,
-                           @Qualifier("streamingWebClient") WebClient streamingWebClient) {
+                           @Qualifier("streamingWebClient") WebClient streamingWebClient,
+                           WebSearchService webSearchService,
+                           SandboxService sandboxService) {
         this.chatSessionMapper = chatSessionMapper;
         this.chatMessageMapper = chatMessageMapper;
         this.hybridRetrievalService = hybridRetrievalService;
@@ -63,11 +82,9 @@ public class ChatServiceImpl implements ChatService {
         this.openAIConfig = openAIConfig;
         this.objectMapper = objectMapper;
         this.streamingWebClient = streamingWebClient;
+        this.webSearchService = webSearchService;
+        this.sandboxService = sandboxService;
     }
-
-    // ----------------------------------------------------------------
-    //  Streaming Chat
-    // ----------------------------------------------------------------
 
     @Override
     public void streamChat(ChatRequest request, Long userId, SseEmitter emitter) {
@@ -109,7 +126,24 @@ public class ChatServiceImpl implements ChatService {
                 log.warn("RAG retrieval failed, continuing without context: {}", e.getMessage());
             }
 
-            // 4. Build context-enriched prompt
+            // 4. Web search (if message contains search keywords)
+            List<SearchResult> webResults = new ArrayList<>();
+            if (needsWebSearch(request.getMessage())) {
+                try {
+                    webResults = webSearchService.search(request.getMessage(), 5);
+                    if (!webResults.isEmpty()) {
+                        emitter.send(SseEmitter.event()
+                                .name("websearch")
+                                .data(objectMapper.writeValueAsString(
+                                        ChatStreamEvent.source(webResults))));
+                        log.info("Web search returned {} results for query", webResults.size());
+                    }
+                } catch (Exception e) {
+                    log.warn("Web search failed: {}", e.getMessage());
+                }
+            }
+
+            // 5. Build context-enriched prompt
             Map<String, Object> context = new HashMap<>();
             if (request.isUseMemory()) {
                 try {
@@ -119,10 +153,14 @@ public class ChatServiceImpl implements ChatService {
                 }
             }
 
-            String systemPrompt = buildSystemPrompt(context, searchResults);
+            // Merge all search results for system prompt
+            List<SearchResult> allResults = new ArrayList<>(searchResults);
+            allResults.addAll(webResults);
+
+            String systemPrompt = buildSystemPrompt(context, allResults);
             List<Map<String, String>> messages = buildMessages(systemPrompt, sessionId, request.getMessage());
 
-            // 5. Stream response from LLM
+            // 6. Stream response from LLM
             AtomicReference<StringBuilder> fullResponse = new AtomicReference<>(new StringBuilder());
             java.util.concurrent.atomic.AtomicBoolean emitterCompleted = new java.util.concurrent.atomic.AtomicBoolean(false);
 
@@ -134,15 +172,29 @@ public class ChatServiceImpl implements ChatService {
                     "stream", true
             );
 
+            final StringBuilder lineBuffer = new StringBuilder();
+
             streamingWebClient.post()
                     .uri("/chat/completions")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(requestBody)
                     .retrieve()
-                    .bodyToFlux(String.class)
+                    .bodyToFlux(DataBuffer.class)
+                    .map(buf -> {
+                        String s = buf.toString(StandardCharsets.UTF_8);
+                        DataBufferUtils.release(buf);
+                        return s;
+                    })
                     .doOnNext(chunk -> {
                         try {
-                            processStreamChunk(chunk, emitter, fullResponse);
+                            lineBuffer.append(chunk);
+                            int nlIdx;
+                            while ((nlIdx = lineBuffer.indexOf("\n")) >= 0) {
+                                String line = lineBuffer.substring(0, nlIdx).trim();
+                                lineBuffer.delete(0, nlIdx + 1);
+                                if (line.isEmpty()) continue;
+                                processSseLine(line, emitter, fullResponse);
+                            }
                         } catch (Exception e) {
                             log.debug("Error processing stream chunk: {}", e.getMessage());
                         }
@@ -160,10 +212,21 @@ public class ChatServiceImpl implements ChatService {
                         }
                     })
                     .doOnComplete(() -> {
+                        if (lineBuffer.length() > 0) {
+                            try {
+                                processSseLine(lineBuffer.toString().trim(), emitter, fullResponse);
+                            } catch (Exception ignored) {}
+                        }
                         if (emitterCompleted.compareAndSet(false, true)) {
                             try {
-                                // Save assistant message
                                 String assistantContent = fullResponse.get().toString();
+
+                                // 7. Detect and execute code blocks in sandbox
+                                if (!assistantContent.isEmpty()) {
+                                    executeCodeBlocks(assistantContent, emitter);
+                                }
+
+                                // 8. Save assistant message
                                 if (!assistantContent.isEmpty()) {
                                     ChatMessage assistantMessage = new ChatMessage();
                                     assistantMessage.setSessionId(sessionId);
@@ -172,9 +235,6 @@ public class ChatServiceImpl implements ChatService {
                                     assistantMessage.setCreatedAt(LocalDateTime.now());
                                     chatMessageMapper.insert(assistantMessage);
                                 }
-
-                                // Send [DONE] marker (OpenAI SSE convention)
-                                emitter.send("data: [DONE]\n\n");
                                 emitter.complete();
                             } catch (Exception e) {
                                 log.error("Error completing stream: {}", e.getMessage(), e);
@@ -224,30 +284,23 @@ public class ChatServiceImpl implements ChatService {
 
     @Override
     public void deleteSession(Long sessionId, Long userId) {
-        // Verify ownership
         ChatSession session = chatSessionMapper.selectById(sessionId);
         if (session == null || !session.getUserId().equals(userId)) {
             throw new RuntimeException("Session not found or access denied");
         }
-
-        // Delete messages
         chatMessageMapper.delete(
                 new LambdaQueryWrapper<ChatMessage>()
                         .eq(ChatMessage::getSessionId, sessionId));
-
-        // Delete session
         chatSessionMapper.deleteById(sessionId);
         log.info("Deleted session [{}] for user [{}]", sessionId, userId);
     }
 
     @Override
     public List<ChatMessage> getSessionMessages(Long sessionId, Long userId) {
-        // Verify ownership
         ChatSession session = chatSessionMapper.selectById(sessionId);
         if (session == null || !session.getUserId().equals(userId)) {
             throw new RuntimeException("Session not found or access denied");
         }
-
         return chatMessageMapper.selectList(
                 new LambdaQueryWrapper<ChatMessage>()
                         .eq(ChatMessage::getSessionId, sessionId)
@@ -258,76 +311,117 @@ public class ChatServiceImpl implements ChatService {
     //  Internal Methods
     // ----------------------------------------------------------------
 
-    /**
-     * Process a single SSE chunk from the OpenAI streaming API.
-     */
-    private void processStreamChunk(String chunk, SseEmitter emitter,
-                                    AtomicReference<StringBuilder> fullResponse) throws Exception {
-        if (chunk == null || chunk.isBlank() || chunk.equals("[DONE]")) {
+    private void processSseLine(String line, SseEmitter emitter,
+                                AtomicReference<StringBuilder> fullResponse) throws Exception {
+        if (line == null || line.isEmpty()) return;
+
+        String data;
+        if (line.startsWith("data: ")) {
+            data = line.substring(6);
+        } else if (line.startsWith("data:")) {
+            data = line.substring(5);
+        } else {
             return;
         }
 
-        // WebClient strips "data: " prefix, so chunk may be raw JSON or SSE format
-        for (String line : chunk.split("\n")) {
-            line = line.trim();
-            if (line.isEmpty()) {
-                continue;
-            }
+        if (data.equals("[DONE]")) return;
+        if (!data.startsWith("{")) return;
 
-            // Strip "data: " prefix if present
-            String data;
-            if (line.startsWith("data: ")) {
-                data = line.substring(6).trim();
-            } else if (line.startsWith("data:")) {
-                data = line.substring(5).trim();
-            } else {
-                data = line;
-            }
-
-            if (data.equals("[DONE]")) {
-                return;
-            }
-
-            // Skip non-JSON lines
-            if (!data.startsWith("{")) {
-                continue;
-            }
-
-            try {
-                JsonNode root = objectMapper.readTree(data);
-                JsonNode choices = root.path("choices");
-                if (choices.isArray() && choices.size() > 0) {
-                    JsonNode delta = choices.get(0).path("delta");
-
-                    // Extract content: only use "content" (skip "reasoning_content" which is internal thinking)
-                    String content = extractTextContent(delta.path("content"));
-
-                    if (content != null) {
-                        fullResponse.get().append(content);
-                        emitter.send(SseEmitter.event()
-                                .name("content")
-                                .data(objectMapper.writeValueAsString(
-                                        ChatStreamEvent.content(content))));
-                    }
-                }
-            } catch (Exception e) {
-                log.debug("Failed to parse chunk: {}", e.getMessage());
+        JsonNode root = objectMapper.readTree(data);
+        JsonNode choices = root.path("choices");
+        if (choices.isArray() && !choices.isEmpty()) {
+            JsonNode delta = choices.get(0).path("delta");
+            String content = extractTextContent(delta.path("content"));
+            if (content != null) {
+                fullResponse.get().append(content);
+                emitter.send(SseEmitter.event()
+                        .name("content")
+                        .data(objectMapper.writeValueAsString(
+                                ChatStreamEvent.content(content))));
             }
         }
     }
 
     /**
-     * Build system prompt with RAG context and memory.
+     * Check if the user message likely needs web search.
      */
+    private boolean needsWebSearch(String message) {
+        if (message == null) return false;
+        String lower = message.toLowerCase();
+        for (String keyword : SEARCH_KEYWORDS) {
+            if (lower.contains(keyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Detect code blocks in the assistant's response and execute them in sandbox.
+     */
+    private void executeCodeBlocks(String content, SseEmitter emitter) {
+        Matcher matcher = CODE_BLOCK_PATTERN.matcher(content);
+        while (matcher.find()) {
+            String lang = matcher.group(1).toLowerCase();
+            String code = matcher.group(2).trim();
+            if (code.isEmpty()) continue;
+
+            // Normalize language name
+            String language = switch (lang) {
+                case "py" -> "python";
+                case "js" -> "javascript";
+                default -> lang;
+            };
+
+            log.info("Detected code block, language={}, length={}", language, code.length());
+            try {
+                SandboxExecuteRequest req = new SandboxExecuteRequest();
+                req.setLanguage(language);
+                req.setCode(code);
+                req.setTimeout(30);
+
+                SandboxExecuteResponse response = sandboxService.execute(req);
+
+                // Send sandbox result as SSE event
+                Map<String, Object> sandboxEvent = new HashMap<>();
+                sandboxEvent.put("language", language);
+                sandboxEvent.put("code", code);
+                sandboxEvent.put("output", response.getOutput());
+                sandboxEvent.put("error", response.getError());
+                sandboxEvent.put("exitCode", response.getExitCode());
+                sandboxEvent.put("executionTime", response.getExecutionTime());
+
+                emitter.send(SseEmitter.event()
+                        .name("sandbox")
+                        .data(objectMapper.writeValueAsString(sandboxEvent)));
+
+                log.info("Sandbox execution completed: exitCode={}, time={}ms",
+                        response.getExitCode(), response.getExecutionTime());
+            } catch (Exception e) {
+                log.warn("Sandbox execution failed: {}", e.getMessage());
+                try {
+                    Map<String, Object> errorEvent = new HashMap<>();
+                    errorEvent.put("language", language);
+                    errorEvent.put("code", code);
+                    errorEvent.put("error", "Execution failed: " + e.getMessage());
+                    errorEvent.put("exitCode", -1);
+                    emitter.send(SseEmitter.event()
+                            .name("sandbox")
+                            .data(objectMapper.writeValueAsString(errorEvent)));
+                } catch (Exception ignored) {}
+            }
+        }
+    }
+
     private String buildSystemPrompt(Map<String, Object> context,
                                      List<SearchResult> searchResults) {
         StringBuilder prompt = new StringBuilder();
-        prompt.append("You are an intelligent learning assistant. ");
-        prompt.append("Answer the user's questions based on the provided context and your knowledge.\n\n");
+        prompt.append("你是一个智能学习助手。基于提供的上下文和你的知识回答用户的问题。\n\n");
+        prompt.append("如果用户要求你写代码，请直接写出完整的代码。");
+        prompt.append("代码会被自动在沙箱环境中执行并返回结果。\n\n");
 
-        // Add RAG context
         if (!searchResults.isEmpty()) {
-            prompt.append("## Reference Materials\n");
+            prompt.append("## 参考资料\n");
             for (int i = 0; i < searchResults.size(); i++) {
                 SearchResult r = searchResults.get(i);
                 prompt.append("[").append(i + 1).append("] ");
@@ -339,12 +433,11 @@ public class ChatServiceImpl implements ChatService {
             prompt.append("\n");
         }
 
-        // Add memory context
         if (context.containsKey("longTermRecall")) {
             @SuppressWarnings("unchecked")
             List<String> recall = (List<String>) context.get("longTermRecall");
             if (recall != null && !recall.isEmpty()) {
-                prompt.append("## Relevant Memories\n");
+                prompt.append("## 相关记忆\n");
                 for (int i = 0; i < recall.size(); i++) {
                     prompt.append(i + 1).append(". ").append(recall.get(i)).append("\n");
                 }
@@ -355,22 +448,17 @@ public class ChatServiceImpl implements ChatService {
         return prompt.toString();
     }
 
-    /**
-     * Build the messages list for the LLM API call.
-     */
     private List<Map<String, String>> buildMessages(String systemPrompt, Long sessionId,
                                                      String currentMessage) {
         List<Map<String, String>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", systemPrompt));
 
-        // Load recent history
         List<ChatMessage> history = chatMessageMapper.selectList(
                 new LambdaQueryWrapper<ChatMessage>()
                         .eq(ChatMessage::getSessionId, sessionId)
                         .orderByDesc(ChatMessage::getCreatedAt)
                         .last("LIMIT 20"));
 
-        // Reverse to chronological order
         for (int i = history.size() - 1; i >= 0; i--) {
             ChatMessage msg = history.get(i);
             messages.add(Map.of("role", msg.getRole(), "content", msg.getContent()));
@@ -379,10 +467,6 @@ public class ChatServiceImpl implements ChatService {
         return messages;
     }
 
-    /**
-     * Extract text content from a JSON node.
-     * Returns null for missing, null, empty, or non-text nodes.
-     */
     private String extractTextContent(JsonNode node) {
         if (node == null || node.isMissingNode() || node.isNull()) {
             return null;

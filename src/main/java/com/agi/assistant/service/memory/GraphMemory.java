@@ -10,6 +10,7 @@ import org.neo4j.driver.Result;
 import org.neo4j.driver.Session;
 import org.neo4j.driver.types.Node;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -32,8 +33,16 @@ public class GraphMemory {
 
     private final Driver neo4jDriver;
 
-    public GraphMemory(Driver neo4jDriver) {
+    public GraphMemory(@Nullable Driver neo4jDriver) {
         this.neo4jDriver = neo4jDriver;
+    }
+
+    private boolean isNeo4jAvailable() {
+        if (neo4jDriver == null) {
+            log.warn("Neo4j not available, skipping graph operation");
+            return false;
+        }
+        return true;
     }
 
     // ----------------------------------------------------------------
@@ -50,7 +59,7 @@ public class GraphMemory {
      * @return the created GraphEntity representing the memory node
      */
     public GraphEntity addMemoryNode(Long userId, String memoryId, String content, double importance) {
-        if (userId == null || memoryId == null || content == null) {
+        if (!isNeo4jAvailable() || userId == null || memoryId == null || content == null) {
             return null;
         }
 
@@ -95,7 +104,7 @@ public class GraphMemory {
      * @param topic    the topic name
      */
     public void linkMemoryToTopic(String memoryId, String topic) {
-        if (memoryId == null || topic == null || topic.isBlank()) {
+        if (!isNeo4jAvailable() || memoryId == null || topic == null || topic.isBlank()) {
             return;
         }
 
@@ -128,7 +137,7 @@ public class GraphMemory {
      * @param entityType the entity type (e.g. "Person", "Concept")
      */
     public void linkMemoryToEntity(String memoryId, String entityName, String entityType) {
-        if (memoryId == null || entityName == null || entityName.isBlank()) {
+        if (!isNeo4jAvailable() || memoryId == null || entityName == null || entityName.isBlank()) {
             return;
         }
 
@@ -163,7 +172,7 @@ public class GraphMemory {
      * @return list of related memory content and their relation info
      */
     public List<Map<String, Object>> getRelatedMemories(String memoryId, int maxDepth) {
-        if (memoryId == null) {
+        if (!isNeo4jAvailable() || memoryId == null) {
             return Collections.emptyList();
         }
 
@@ -212,7 +221,7 @@ public class GraphMemory {
      * @return ordered list of memory nodes in the chain
      */
     public List<Map<String, Object>> getMemoryChain(Long userId, int limit) {
-        if (userId == null) {
+        if (!isNeo4jAvailable() || userId == null) {
             return Collections.emptyList();
         }
 
@@ -264,7 +273,7 @@ public class GraphMemory {
      * @param toMemoryId   the later memory
      */
     public void linkMemorySequence(String fromMemoryId, String toMemoryId) {
-        if (fromMemoryId == null || toMemoryId == null) {
+        if (!isNeo4jAvailable() || fromMemoryId == null || toMemoryId == null) {
             return;
         }
 
@@ -297,7 +306,7 @@ public class GraphMemory {
      * @param similarityScore the similarity score
      */
     public void linkSimilarMemories(String memoryIdA, String memoryIdB, double similarityScore) {
-        if (memoryIdA == null || memoryIdB == null) {
+        if (!isNeo4jAvailable() || memoryIdA == null || memoryIdB == null) {
             return;
         }
 

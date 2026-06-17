@@ -1,5 +1,5 @@
 import request from '@/utils/request'
-import type { Result, ChatSession, ChatMessage, ChatRequest, SourceReference } from '@/types'
+import type { Result, ChatSession, ChatMessage, ChatRequest, SourceReference, SandboxExecution } from '@/types'
 
 export function listSessions(): Promise<Result<ChatSession[]>> {
   return request.get('/chat/sessions')
@@ -17,12 +17,18 @@ export function getMessages(sessionId: string): Promise<Result<ChatMessage[]>> {
   return request.get(`/chat/sessions/${sessionId}/messages`)
 }
 
+export interface StreamCallbacks {
+  onMessage: (chunk: string) => void
+  onDone: () => void
+  onError: (error: Error) => void
+  onSource?: (sources: SourceReference[]) => void
+  onWebSearch?: (results: SourceReference[]) => void
+  onSandbox?: (result: SandboxExecution) => void
+}
+
 export function streamChat(
   req: ChatRequest,
-  onMessage: (chunk: string) => void,
-  onDone: () => void,
-  onError: (error: Error) => void,
-  onSource?: (sources: SourceReference[]) => void
+  callbacks: StreamCallbacks
 ): () => void {
   const controller = new AbortController()
   const userId = localStorage.getItem('userId') || '1'
@@ -46,11 +52,12 @@ export function streamChat(
       }
       const decoder = new TextDecoder()
       let buffer = ''
+      let currentEvent = ''
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) {
-          onDone()
+          callbacks.onDone()
           break
         }
         buffer += decoder.decode(value, { stream: true })
@@ -61,35 +68,42 @@ export function streamChat(
           const trimmed = line.trim()
           if (!trimmed) continue
 
-          // Handle [DONE] marker (OpenAI SSE convention)
           if (trimmed === 'data: [DONE]') {
-            onDone()
+            callbacks.onDone()
             return
           }
 
-          // Skip event: lines (informational only)
-          if (trimmed.startsWith('event:')) continue
+          // Capture SSE event name
+          if (trimmed.startsWith('event:')) {
+            currentEvent = trimmed.slice(6).trim()
+            continue
+          }
 
-          // Handle data lines (may follow an event: line)
           if (trimmed.startsWith('data:')) {
             const data = trimmed.slice(5).trim()
             if (!data) continue
             try {
               const parsed = JSON.parse(data)
-              // Handle ChatStreamEvent format: { type: "...", content: ... }
-              if (parsed.type === 'content' && parsed.content) {
-                onMessage(parsed.content)
-              } else if (parsed.type === 'source' && parsed.content && onSource) {
-                onSource(parsed.content)
+              // Route by SSE event name (set by backend emitter.send(...).name(...))
+              if (currentEvent === 'sandbox' && callbacks.onSandbox) {
+                callbacks.onSandbox(parsed)
+              } else if (currentEvent === 'websearch' && callbacks.onWebSearch) {
+                callbacks.onWebSearch(parsed.content || parsed)
+              } else if (currentEvent === 'source' && callbacks.onSource) {
+                callbacks.onSource(parsed.content || parsed)
+              } else if (currentEvent === 'content' || parsed.type === 'content') {
+                callbacks.onMessage(parsed.content || parsed)
               } else if (parsed.type === 'done') {
-                onDone()
+                callbacks.onDone()
                 return
               } else if (parsed.content) {
-                onMessage(parsed.content)
+                callbacks.onMessage(parsed.content)
               }
+              // Reset event name after processing data
+              currentEvent = ''
             } catch {
-              // Plain text data
-              onMessage(data)
+              callbacks.onMessage(data)
+              currentEvent = ''
             }
           }
         }
@@ -97,7 +111,7 @@ export function streamChat(
     })
     .catch((error) => {
       if (error.name !== 'AbortError') {
-        onError(error)
+        callbacks.onError(error)
       }
     })
 

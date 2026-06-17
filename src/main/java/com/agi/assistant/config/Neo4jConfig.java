@@ -51,11 +51,12 @@ public class Neo4jConfig {
             try {
                 driver.verifyConnectivity();
                 log.info("Neo4j connection established to {}", uri);
+                return this.driver;
             } catch (Exception e) {
-                log.warn("Neo4j driver created but connectivity check failed: {}", e.getMessage());
+                log.warn("Neo4j connectivity check failed: {}. Graph features will be unavailable.", e.getMessage());
+                driver.close();
+                return null;
             }
-
-            return this.driver;
         } catch (Exception e) {
             log.warn("Failed to create Neo4j driver: {}. Graph features will be unavailable.", e.getMessage());
             return null;

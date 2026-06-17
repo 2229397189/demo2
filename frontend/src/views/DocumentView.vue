@@ -197,10 +197,12 @@ async function handleProcess(doc: DocType) {
       { type: 'info' }
     )
     await documentApi.processDocument(doc.id)
-    ElMessage.success('文档处理已启动')
+    ElMessage.success('文档处理已启动，请稍后点击刷新按钮查看状态')
     await loadDocuments()
-  } catch {
-    // cancelled
+  } catch (error: any) {
+    if (error !== 'cancel' && error?.message) {
+      ElMessage.error(error.message || '文档处理失败')
+    }
   }
 }
 

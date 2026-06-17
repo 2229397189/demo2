@@ -25,6 +25,8 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   sources?: SourceReference[]
+  webResults?: SourceReference[]
+  sandboxResults?: SandboxExecution[]
   createdAt: string
 }
 
@@ -128,4 +130,13 @@ export interface SandboxResponse {
   exitCode: number
   executionTime: number
   memoryUsage: number
+}
+
+export interface SandboxExecution {
+  language: string
+  code: string
+  output: string
+  error: string
+  exitCode: number
+  executionTime: number
 }

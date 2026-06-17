@@ -53,10 +53,11 @@ public class MilvusService {
     private final int vectorDim;
 
     public MilvusService(@org.springframework.lang.Nullable MilvusServiceClient milvusClient,
-                         @org.springframework.beans.factory.annotation.Value("${milvus.collection:documents}") String milvusCollectionName,
-                         @org.springframework.beans.factory.annotation.Value("${milvus.vector-dim:1024}") Integer milvusVectorDim) {
+                         @org.springframework.beans.factory.annotation.Value("${milvus.collection-prefix:agi_}") String collectionPrefix,
+                         @org.springframework.beans.factory.annotation.Value("${embedding.dimensions:1024}") Integer milvusVectorDim) {
         this.milvusClient = milvusClient;
-        this.collectionName = milvusCollectionName;
+        // Build collection name from prefix: "agi_" -> "agi_vectors"
+        this.collectionName = (collectionPrefix != null ? collectionPrefix : "agi_") + "vectors";
         this.vectorDim = milvusVectorDim != null ? milvusVectorDim : 1024;
     }
 

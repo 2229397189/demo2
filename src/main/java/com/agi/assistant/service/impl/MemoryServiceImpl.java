@@ -82,15 +82,23 @@ public class MemoryServiceImpl implements MemoryService {
         }
 
         // Look up the full Memory entities for the recalled contents
+        // Use selectList to handle potential multiple matches safely
         List<Memory> results = new ArrayList<>();
         for (String content : recalledContents) {
+            if (content == null || content.isBlank()) {
+                continue;
+            }
+            // Escape LIKE special characters and use a reasonable prefix
+            String searchPrefix = content.substring(0, Math.min(content.length(), 200));
+            searchPrefix = escapeLikeSpecialChars(searchPrefix);
+
             LambdaQueryWrapper<Memory> wrapper = new LambdaQueryWrapper<Memory>()
                     .eq(Memory::getUserId, request.getUserId())
-                    .like(Memory::getContent, content.substring(0, Math.min(content.length(), 100)))
+                    .like(Memory::getContent, searchPrefix)
                     .last("LIMIT 1");
-            Memory memory = memoryMapper.selectOne(wrapper);
-            if (memory != null) {
-                results.add(memory);
+            List<Memory> memories = memoryMapper.selectList(wrapper);
+            if (!memories.isEmpty()) {
+                results.add(memories.get(0));
             }
         }
 
@@ -143,5 +151,15 @@ public class MemoryServiceImpl implements MemoryService {
         log.debug("Built user profile for user [{}]: topics={}, totalMemories={}",
                 userId, profile.getTopics(), profile.getTotalMemories());
         return profile;
+    }
+
+    /**
+     * Escape special LIKE characters (%, _, \) in search strings.
+     */
+    private String escapeLikeSpecialChars(String str) {
+        if (str == null) return null;
+        return str.replace("\\", "\\\\")
+                  .replace("%", "\\%")
+                  .replace("_", "\\_");
     }
 }

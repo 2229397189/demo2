@@ -11,6 +11,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Flux;
 import reactor.netty.http.client.HttpClient;
 
 import java.time.Duration;
@@ -53,6 +54,8 @@ public class OpenAIConfig {
     public WebClient streamingWebClient() {
         HttpClient httpClient = HttpClient.create()
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeout * 1000)
+                .option(ChannelOption.SO_KEEPALIVE, true)
+                .option(ChannelOption.TCP_NODELAY, true)
                 .responseTimeout(Duration.ofSeconds(timeout * 2));
 
         return WebClient.builder()

@@ -95,22 +95,22 @@
           <h1>AGI Assistant</h1>
           <p>智能问答助手，支持文档检索、记忆管理和代码执行</p>
           <div class="feature-cards">
-            <el-card shadow="hover" class="feature-card">
+            <el-card shadow="hover" class="feature-card" @click="router.push('/')">
               <el-icon size="32" color="#409eff"><ChatDotRound /></el-icon>
               <h3>智能对话</h3>
               <p>基于RAG的精准问答</p>
             </el-card>
-            <el-card shadow="hover" class="feature-card">
+            <el-card shadow="hover" class="feature-card" @click="router.push('/documents')">
               <el-icon size="32" color="#67c23a"><Document /></el-icon>
               <h3>文档管理</h3>
               <p>上传并管理知识库</p>
             </el-card>
-            <el-card shadow="hover" class="feature-card">
+            <el-card shadow="hover" class="feature-card" @click="router.push('/memory')">
               <el-icon size="32" color="#e6a23c"><Coin /></el-icon>
               <h3>记忆系统</h3>
               <p>个性化记忆与画像</p>
             </el-card>
-            <el-card shadow="hover" class="feature-card">
+            <el-card shadow="hover" class="feature-card" @click="router.push('/sandbox')">
               <el-icon size="32" color="#f56c6c"><Monitor /></el-icon>
               <h3>代码沙箱</h3>
               <p>安全执行代码片段</p>
@@ -124,6 +124,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import {
   Plus,
@@ -140,6 +141,7 @@ import ChatWindow from '@/components/chat/ChatWindow.vue'
 import dayjs from 'dayjs'
 
 const chatStore = useChatStore()
+const router = useRouter()
 const searchText = ref('')
 const inputMessage = ref('')
 const retrievalStrategy = ref<'dense' | 'sparse' | 'graph' | 'hybrid'>('hybrid')

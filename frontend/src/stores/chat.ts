@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { ChatSession, ChatMessage, ChatRequest, SourceReference } from '@/types'
+import type { ChatSession, ChatMessage, ChatRequest, SourceReference, SandboxExecution } from '@/types'
 import * as chatApi from '@/api/chat'
 
 /** Normalize backend session (number IDs, no messageCount) to frontend type */
@@ -34,6 +34,8 @@ export const useChatStore = defineStore('chat', () => {
   const isStreaming = ref(false)
   const streamContent = ref('')
   const streamSources = ref<SourceReference[]>([])
+  const streamWebResults = ref<SourceReference[]>([])
+  const streamSandboxResults = ref<SandboxExecution[]>([])
 
   const sortedSessions = computed(() =>
     [...sessions.value].sort((a, b) =>
@@ -119,6 +121,8 @@ export const useChatStore = defineStore('chat', () => {
     isStreaming.value = true
     streamContent.value = ''
     streamSources.value = []
+    streamWebResults.value = []
+    streamSandboxResults.value = []
 
     const assistantMessage: ChatMessage = {
       id: (Date.now() + 1).toString(),
@@ -126,32 +130,45 @@ export const useChatStore = defineStore('chat', () => {
       role: 'assistant',
       content: '',
       sources: [],
+      webResults: [],
+      sandboxResults: [],
       createdAt: new Date().toISOString(),
     }
     messages.value.push(assistantMessage)
+    const assistantIndex = messages.value.length - 1
 
-    chatApi.streamChat(
-      req,
-      (chunk: string) => {
+    chatApi.streamChat(req, {
+      onMessage(chunk: string) {
         streamContent.value += chunk
-        assistantMessage.content = streamContent.value
+        messages.value.splice(assistantIndex, 1, {
+          ...messages.value[assistantIndex],
+          content: streamContent.value,
+        })
       },
-      () => {
+      onDone() {
         isStreaming.value = false
-        assistantMessage.sources = [...streamSources.value]
+        messages.value.splice(assistantIndex, 1, {
+          ...messages.value[assistantIndex],
+          content: streamContent.value,
+          sources: [...streamSources.value],
+          webResults: [...streamWebResults.value],
+          sandboxResults: [...streamSandboxResults.value],
+        })
         const session = sessions.value.find(s => s.id === currentSession.value?.id)
         if (session) {
           session.updatedAt = new Date().toISOString()
           session.messageCount = (session.messageCount || 0) + 2
         }
       },
-      (error: Error) => {
+      onError(error: Error) {
         isStreaming.value = false
-        assistantMessage.content += '\n\n[流式响应中断: ' + error.message + ']'
+        messages.value.splice(assistantIndex, 1, {
+          ...messages.value[assistantIndex],
+          content: streamContent.value + '\n\n[流式响应中断: ' + error.message + ']',
+        })
         console.error('Stream error:', error)
       },
-      (sources: SourceReference[]) => {
-        // Map backend SearchResult fields to SourceReference
+      onSource(sources: SourceReference[]) {
         streamSources.value = sources.map((s: any) => ({
           id: s.id,
           documentId: s.documentId || '',
@@ -160,8 +177,36 @@ export const useChatStore = defineStore('chat', () => {
           score: s.score || 0,
           chunkIndex: s.chunkIndex || 0,
         }))
-      }
-    )
+      },
+      onWebSearch(results: SourceReference[]) {
+        streamWebResults.value = results.map((s: any) => ({
+          id: s.id,
+          documentId: s.documentId || '',
+          documentName: s.documentName || s.title || '',
+          content: s.content || '',
+          score: s.score || 0,
+          chunkIndex: s.chunkIndex || 0,
+          source: s.source || '',
+        }))
+      },
+      onSandbox(result: SandboxExecution) {
+        streamSandboxResults.value.push(result)
+        // Also append sandbox output to message content for visibility
+        const sandboxOutput = result.error
+          ? `\n\n> [代码执行错误] ${result.error}`
+          : result.output
+            ? `\n\n> [代码执行结果]\n> ${result.output.trim().replace(/\n/g, '\n> ')}`
+            : ''
+        if (sandboxOutput) {
+          streamContent.value += sandboxOutput
+          messages.value.splice(assistantIndex, 1, {
+            ...messages.value[assistantIndex],
+            content: streamContent.value,
+            sandboxResults: [...streamSandboxResults.value],
+          })
+        }
+      },
+    })
   }
 
   return {
@@ -172,6 +217,8 @@ export const useChatStore = defineStore('chat', () => {
     isStreaming,
     streamContent,
     streamSources,
+    streamWebResults,
+    streamSandboxResults,
     sortedSessions,
     loadSessions,
     createSession,

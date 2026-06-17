@@ -11,9 +11,10 @@
     </div>
     <div v-else class="message-list">
       <MessageBubble
-        v-for="msg in messages"
+        v-for="(msg, index) in messages"
         :key="msg.id"
         :message="msg"
+        :is-streaming="isStreaming && index === messages.length - 1 && msg.role === 'assistant'"
       />
       <div v-if="isStreaming" class="typing-indicator">
         <span></span>
@@ -25,7 +26,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, nextTick } from 'vue'
+import { ref, watch, nextTick, computed } from 'vue'
 import { ChatDotRound } from '@element-plus/icons-vue'
 import type { ChatMessage } from '@/types'
 import MessageBubble from './MessageBubble.vue'
@@ -37,27 +38,23 @@ const props = defineProps<{
 
 const chatContainer = ref<HTMLElement>()
 
-watch(
-  () => props.messages.length,
-  () => {
-    nextTick(() => {
-      if (chatContainer.value) {
-        chatContainer.value.scrollTop = chatContainer.value.scrollHeight
-      }
-    })
-  }
-)
+// Track last message content for streaming updates
+const lastMessageContent = computed(() => {
+  const msgs = props.messages
+  return msgs.length > 0 ? msgs[msgs.length - 1].content : ''
+})
 
-watch(
-  () => props.isStreaming,
-  () => {
-    nextTick(() => {
-      if (chatContainer.value) {
-        chatContainer.value.scrollTop = chatContainer.value.scrollHeight
-      }
-    })
-  }
-)
+function scrollToBottom() {
+  nextTick(() => {
+    if (chatContainer.value) {
+      chatContainer.value.scrollTop = chatContainer.value.scrollHeight
+    }
+  })
+}
+
+watch(() => props.messages.length, scrollToBottom)
+watch(lastMessageContent, scrollToBottom)
+watch(() => props.isStreaming, scrollToBottom)
 </script>
 
 <style scoped>

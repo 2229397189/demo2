@@ -14,6 +14,8 @@ import com.agi.assistant.service.rag.ChunkService;
 import com.agi.assistant.service.rag.DocumentParser;
 import com.agi.assistant.service.rag.EmbeddingService;
 import com.agi.assistant.service.rag.MilvusService;
+import org.apache.tika.Tika;
+import org.apache.tika.exception.TikaException;
 import org.springframework.context.annotation.Lazy;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
@@ -25,6 +27,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -48,6 +51,9 @@ public class DocumentServiceImpl implements DocumentService {
 
     private final DocumentMapper documentMapper;
     private final DocumentChunkMapper documentChunkMapper;
+
+    /** Tika 文档解析器，支持 PDF、Word、HTML 等多种格式 */
+    private final Tika tika = new Tika();
     private final DocumentParser documentParser;
     private final ChunkService chunkService;
     private final EmbeddingService embeddingService;
@@ -69,7 +75,7 @@ public class DocumentServiceImpl implements DocumentService {
         try {
             // 1. Save file to disk
             String fileName = generateFileName(file.getOriginalFilename());
-            Path uploadPath = Paths.get(uploadDir);
+            Path uploadPath = Paths.get(uploadDir).toAbsolutePath().normalize();
             if (!Files.exists(uploadPath)) {
                 Files.createDirectories(uploadPath);
             }
@@ -180,31 +186,53 @@ public class DocumentServiceImpl implements DocumentService {
             document.setUpdatedAt(LocalDateTime.now());
             documentMapper.updateById(document);
 
-            // 1. Read file content
-            String rawContent = Files.readString(Paths.get(document.getFilePath()));
+            // 1. Read file content based on file type
+            Path filePath = Paths.get(document.getFilePath());
+            String fileType = document.getFileType();
+            String rawContent;
+
+            log.info("Step 1/4: Parsing document [{}], type={}, path={}", id, fileType, filePath);
+
+            if ("markdown".equals(fileType) || "text".equals(fileType)) {
+                // Markdown 和纯文本直接读取
+                rawContent = Files.readString(filePath);
+            } else if ("pdf".equals(fileType) || "word".equals(fileType) || "unknown".equals(fileType)) {
+                // 使用 Tika 解析 PDF、Word、HTML 等格式
+                rawContent = parseWithTika(filePath);
+            } else {
+                // 尝试作为文本读取
+                rawContent = Files.readString(filePath);
+            }
+
+            if (rawContent == null || rawContent.isBlank()) {
+                throw new RuntimeException("文档内容为空或无法解析");
+            }
+
             String documentIdStr = String.valueOf(id);
 
-            // 2. Parse document
-            log.info("Step 1/4: Parsing document [{}]", id);
+            // 2. Parse document (clean content)
+            log.info("Step 2/4: Cleaning content for document [{}], length={}", id, rawContent.length());
             ParsedDocument parsed = documentParser.parse(documentIdStr, rawContent);
             String cleanedContent = parsed.getCleanedContent();
+
+            if (cleanedContent == null || cleanedContent.isBlank()) {
+                throw new RuntimeException("文档清洗后内容为空");
+            }
 
             // 3. Chunk document
             log.info("Step 2/4: Chunking document [{}]", id);
             List<DocumentChunk> chunks = chunkService.chunkBySemantic(documentIdStr, cleanedContent);
             log.info("Document [{}] chunked into {} pieces", id, chunks.size());
 
-            // 4. Generate embeddings
-            log.info("Step 3/4: Generating embeddings for [{}]", id);
+            // 4. Generate embeddings (batch)
+            log.info("Step 3/4: Generating embeddings for [{}], {} chunks", id, chunks.size());
             List<String> chunkContents = chunks.stream()
                     .map(DocumentChunk::getContent)
                     .collect(Collectors.toList());
 
-            List<List<Float>> embeddings = new ArrayList<>();
-            for (String content : chunkContents) {
-                List<Float> embedding = embeddingService.embed(content);
-                embeddings.add(embedding);
-            }
+            // 使用批量 embedding 提高性能
+            List<List<Float>> embeddings = embeddingService.embedBatch(chunkContents);
+            log.info("Generated {} embeddings for document [{}]", embeddings.size(), id);
 
             // 5. Index into Milvus
             log.info("Step 4/4: Indexing document [{}] into vector store and BM25", id);
@@ -277,6 +305,24 @@ public class DocumentServiceImpl implements DocumentService {
         if (fileName.endsWith(".txt")) return "text";
         if (fileName.endsWith(".pdf")) return "pdf";
         if (fileName.endsWith(".doc") || fileName.endsWith(".docx")) return "word";
+        if (fileName.endsWith(".html") || fileName.endsWith(".htm")) return "html";
         return "unknown";
+    }
+
+    /**
+     * 使用 Apache Tika 解析文档，支持 PDF、Word、HTML 等多种格式。
+     *
+     * @param filePath 文件路径
+     * @return 提取的文本内容
+     */
+    private String parseWithTika(Path filePath) {
+        try (InputStream inputStream = Files.newInputStream(filePath)) {
+            String content = tika.parseToString(inputStream);
+            log.info("Tika parsed file [{}], extracted {} characters", filePath.getFileName(), content.length());
+            return content;
+        } catch (IOException | TikaException e) {
+            log.error("Tika failed to parse file [{}]: {}", filePath, e.getMessage(), e);
+            throw new RuntimeException("文档解析失败: " + e.getMessage(), e);
+        }
     }
 }

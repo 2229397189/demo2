@@ -13,8 +13,14 @@
         <span class="message-role">{{ message.role === 'user' ? '用户' : 'AI助手' }}</span>
         <span class="message-time">{{ formatTime(message.createdAt) }}</span>
       </div>
-      <div class="message-body" v-html="renderedContent" />
+      <div class="message-body" :class="{ 'streaming': isStreaming }" v-html="renderedContent" />
       <SourceReference v-if="message.sources?.length" :sources="message.sources" />
+      <SourceReference v-if="message.webResults?.length" :sources="message.webResults" />
+      <SandboxResult
+        v-for="(result, idx) in (message.sandboxResults || [])"
+        :key="idx"
+        :result="result"
+      />
     </div>
   </div>
 </template>
@@ -27,10 +33,12 @@ import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
 import type { ChatMessage } from '@/types'
 import SourceReference from './SourceReference.vue'
+import SandboxResult from './SandboxResult.vue'
 import dayjs from 'dayjs'
 
 const props = defineProps<{
   message: ChatMessage
+  isStreaming?: boolean
 }>()
 
 const md = new MarkdownIt({
@@ -164,5 +172,20 @@ function formatTime(date: string) {
 
 .message-body :deep(th) {
   background: #f5f7fa;
+}
+
+/* Streaming cursor effect */
+.message-body.streaming::after {
+  content: '▋';
+  display: inline-block;
+  color: #409eff;
+  animation: blink 0.8s infinite;
+  margin-left: 2px;
+  font-weight: bold;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 </style>

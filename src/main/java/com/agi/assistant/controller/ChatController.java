@@ -30,24 +30,24 @@ public class ChatController {
     /**
      * Alias for /stream — some frontends POST to /api/chat directly
      */
-    @PostMapping(produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @PostMapping(produces = MediaType.TEXT_EVENT_STREAM_VALUE + ";charset=UTF-8")
     @Operation(summary = "流式聊天(别名)", description = "POST /api/chat 的别名，兼容前端直接调用")
     public SseEmitter chat(
             @Valid @RequestBody ChatRequest request,
             @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId) {
         log.info("Chat request (alias) from user {}, session {}", userId, request.getSessionId());
-        SseEmitter emitter = new SseEmitter(120_000L);
+        SseEmitter emitter = new SseEmitter(300_000L); // 5 min - must exceed WebClient timeout
         chatService.streamChat(request, userId, emitter);
         return emitter;
     }
 
-    @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE + ";charset=UTF-8")
     @Operation(summary = "流式聊天", description = "通过SSE进行流式对话")
     public SseEmitter streamChat(
             @Valid @RequestBody ChatRequest request,
             @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId) {
         log.info("Stream chat request from user {}, session {}", userId, request.getSessionId());
-        SseEmitter emitter = new SseEmitter(120_000L);
+        SseEmitter emitter = new SseEmitter(300_000L); // 5 min - must exceed WebClient timeout
         chatService.streamChat(request, userId, emitter);
         return emitter;
     }

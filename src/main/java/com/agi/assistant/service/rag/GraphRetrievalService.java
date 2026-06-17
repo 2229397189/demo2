@@ -3,11 +3,15 @@ package com.agi.assistant.service.rag;
 import com.agi.assistant.model.entity.GraphEntity;
 import com.agi.assistant.model.entity.GraphRelation;
 import com.agi.assistant.model.entity.SearchResult;
+import com.agi.assistant.config.OpenAIConfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.Record;
 import org.neo4j.driver.Result;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.lang.Nullable;
 import org.neo4j.driver.Session;
 import org.neo4j.driver.types.Node;
 import org.neo4j.driver.types.Path;
@@ -58,12 +62,13 @@ public class GraphRetrievalService {
     private final WebClient llmWebClient;
     private final ObjectMapper objectMapper;
 
-    public GraphRetrievalService(Driver neo4jDriver) {
+    public GraphRetrievalService(@Nullable Driver neo4jDriver, OpenAIConfig openAIConfig) {
         this.neo4jDriver = neo4jDriver;
         this.objectMapper = new ObjectMapper();
-        // 使用通用 LLM API 地址（可从配置注入）
         this.llmWebClient = WebClient.builder()
-                .baseUrl("http://localhost:8080")
+                .baseUrl(openAIConfig.getBaseUrl())
+                .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + openAIConfig.getApiKey())
+                .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .build();
     }
 
@@ -149,7 +154,7 @@ public class GraphRetrievalService {
      * @return 检索结果列表
      */
     public List<SearchResult> graphSearch(List<String> entityNames, int topK) {
-        if (entityNames == null || entityNames.isEmpty()) {
+        if (entityNames == null || entityNames.isEmpty() || neo4jDriver == null) {
             return Collections.emptyList();
         }
 
@@ -215,7 +220,7 @@ public class GraphRetrievalService {
      * @return 检索结果列表
      */
     public List<SearchResult> multiHopExpand(List<String> startEntities, int hopCount, int topK) {
-        if (startEntities == null || startEntities.isEmpty()) {
+        if (startEntities == null || startEntities.isEmpty() || neo4jDriver == null) {
             return Collections.emptyList();
         }
 
@@ -353,6 +358,10 @@ public class GraphRetrievalService {
      * @param documentId 关联文档 ID
      */
     public void writeGraph(List<GraphEntity> entities, List<GraphRelation> relations, String documentId) {
+        if (neo4jDriver == null) {
+            log.warn("Neo4j not available, skipping graph write");
+            return;
+        }
         if ((entities == null || entities.isEmpty()) && (relations == null || relations.isEmpty())) {
             return;
         }

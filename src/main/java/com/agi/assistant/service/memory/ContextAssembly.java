@@ -29,15 +29,18 @@ public class ContextAssembly {
     private final LongTermMemory longTermMemory;
     private final GraphMemory graphMemory;
     private final HybridRetrievalService hybridRetrievalService;
+    private final RuntimeStateMemory runtimeStateMemory;
 
     public ContextAssembly(ShortTermMemory shortTermMemory,
                            LongTermMemory longTermMemory,
                            GraphMemory graphMemory,
-                           HybridRetrievalService hybridRetrievalService) {
+                           HybridRetrievalService hybridRetrievalService,
+                           RuntimeStateMemory runtimeStateMemory) {
         this.shortTermMemory = shortTermMemory;
         this.longTermMemory = longTermMemory;
         this.graphMemory = graphMemory;
         this.hybridRetrievalService = hybridRetrievalService;
+        this.runtimeStateMemory = runtimeStateMemory;
     }
 
     // ----------------------------------------------------------------
@@ -109,6 +112,19 @@ public class ContextAssembly {
             context.put("userProfile", Map.of());
         }
 
+        // 6. Runtime state (Planner + Tool + Task)
+        try {
+            String sessionId = userId.toString();
+            String runtimeContext = runtimeStateMemory.assembleRuntimeContext(sessionId);
+            context.put("runtimeState", runtimeContext);
+            context.put("plannerState", runtimeStateMemory.getOrCreatePlannerState(sessionId));
+            context.put("toolState", runtimeStateMemory.getOrCreateToolState(sessionId));
+            context.put("activeTasks", runtimeStateMemory.getActiveTasks(sessionId));
+        } catch (Exception e) {
+            log.warn("Failed to load runtime state for user [{}]: {}", userId, e.getMessage());
+            context.put("runtimeState", "");
+        }
+
         log.debug("Assembled context for user [{}], task [{}]: stm={}, ltm={}, graph={}, rag={}",
                 userId, taskId,
                 ((List<?>) context.get("shortTermMessages")).size(),
@@ -142,6 +158,12 @@ public class ContextAssembly {
 
         // System instruction
         prompt.append("你是一个智能学习助手，能够根据用户的记忆和知识库提供个性化帮助。\n\n");
+
+        // Runtime state section (Planner + Tool + Task)
+        String runtimeState = (String) memories.getOrDefault("runtimeState", "");
+        if (!runtimeState.isEmpty()) {
+            prompt.append(runtimeState);
+        }
 
         // User profile section
         Map<String, Object> userProfile = (Map<String, Object>) memories.getOrDefault("userProfile", Map.of());

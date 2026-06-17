@@ -4,7 +4,6 @@ import com.agi.assistant.model.dto.SandboxExecuteResponse;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CreateContainerResponse;
-import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.model.*;
 import com.github.dockerjava.core.DefaultDockerClientConfig;
@@ -13,10 +12,14 @@ import com.github.dockerjava.core.DockerClientImpl;
 import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
 import com.github.dockerjava.transport.DockerHttpClient;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -31,27 +34,47 @@ import java.util.concurrent.TimeUnit;
  *   <li>只读文件系统：read_only=true</li>
  *   <li>移除所有 Linux capabilities：cap_drop=ALL</li>
  *   <li>禁止提权：no_new_privileges</li>
- *   <li>内存限制：256MB</li>
- *   <li>CPU 限制：0.5 核</li>
- *   <li>执行超时：30 秒</li>
+ *   <li>内存限制：可配置（默认 512MB）</li>
+ *   <li>CPU 限制：可配置（默认 1.0 核）</li>
+ *   <li>执行超时：可配置（默认 60 秒）</li>
  * </ul>
  */
 @Slf4j
 @Service
 public class SandboxRuntime {
 
-    private static final String IMAGE_PYTHON = "python:3.11-slim";
-    private static final String IMAGE_NODE = "node:20-slim";
-    private static final long DEFAULT_TIMEOUT_SECONDS = 30;
-    private static final long MEMORY_LIMIT = 256 * 1024 * 1024L; // 256MB
-    private static final double CPU_LIMIT = 0.5;
     private static final String SANDBOX_WORK_DIR = "/sandbox";
+
+    private final String imagePython;
+    private final String imageNode;
+    private final String imageJava;
+    private final long defaultTimeoutSeconds;
+    private final long memoryLimit;
+    private final double cpuLimit;
+    private final String dockerHost;
 
     private final DockerClient dockerClient;
 
-    public SandboxRuntime() {
+    public SandboxRuntime(
+            @Value("${sandbox.docker.host:unix:///var/run/docker.sock}") String dockerHost,
+            @Value("${sandbox.docker.image-python:python:3.11-slim}") String imagePython,
+            @Value("${sandbox.docker.image-node:node:20-slim}") String imageNode,
+            @Value("${sandbox.docker.image-java:eclipse-temurin:17-jdk}") String imageJava,
+            @Value("${sandbox.docker.timeout-seconds:60}") long defaultTimeoutSeconds,
+            @Value("${sandbox.docker.memory-limit:512m}") String memoryLimitStr,
+            @Value("${sandbox.docker.cpu-limit:1.0}") double cpuLimit) {
+        this.dockerHost = dockerHost;
+        this.imagePython = imagePython;
+        this.imageNode = imageNode;
+        this.imageJava = imageJava;
+        this.defaultTimeoutSeconds = defaultTimeoutSeconds;
+        this.cpuLimit = cpuLimit;
+
+        // Parse memory limit string (e.g., "512m" -> bytes)
+        this.memoryLimit = parseMemoryLimit(memoryLimitStr);
+
         DockerClientConfig config = DefaultDockerClientConfig.createDefaultConfigBuilder()
-                .withDockerHost("unix:///var/run/docker.sock")
+                .withDockerHost(dockerHost)
                 .build();
 
         DockerHttpClient httpClient = new ApacheDockerHttpClient.Builder()
@@ -73,7 +96,7 @@ public class SandboxRuntime {
      * @return 执行结果
      */
     public SandboxExecuteResponse executeCode(String language, String code, int timeout) {
-        long actualTimeout = timeout > 0 ? timeout : DEFAULT_TIMEOUT_SECONDS;
+        long actualTimeout = timeout > 0 ? timeout : defaultTimeoutSeconds;
         String containerId = null;
         long startTime = System.currentTimeMillis();
 
@@ -84,7 +107,7 @@ public class SandboxRuntime {
             // 2. 创建安全容器
             containerId = createSecureContainer(image, language);
 
-            // 3. 将代码复制到容器中
+            // 3. 将代码复制到容器中（tar 归档格式）
             String fileName = resolveFileName(language);
             copyCodeToContainer(containerId, code, fileName);
 
@@ -132,14 +155,14 @@ public class SandboxRuntime {
                 .withReadonlyRootfs(true)                        // 只读文件系统
                 .withCapDrop(Capability.ALL)                     // 移除所有 capabilities
                 .withSecurityOpts(java.util.List.of("no-new-privileges:true"))  // 禁止提权
-                .withMemory(MEMORY_LIMIT)                        // 内存限制 256MB
-                .withCpuQuota((long) (CPU_LIMIT * 100000))       // CPU 限制 0.5 核
+                .withMemory(memoryLimit)                         // 内存限制
+                .withCpuQuota((long) (cpuLimit * 100000))        // CPU 限制
                 .withAutoRemove(false);
 
         // 创建 tmpfs 挂载以支持可写临时目录
         hostConfig.withTmpFs(java.util.Map.of(
-                SANDBOX_WORK_DIR, "size=64m",
-                "/tmp", "size=64m"
+                SANDBOX_WORK_DIR, "size=256m",
+                "/tmp", "size=128m"
         ));
 
         String[] command = resolveCommand(language);
@@ -159,18 +182,40 @@ public class SandboxRuntime {
     }
 
     /**
-     * 将代码文件复制到容器中。
+     * 将代码文件复制到容器中（创建 tar 归档）。
      */
     private void copyCodeToContainer(String containerId, String code, String fileName) {
-        try (InputStream codeStream = new ByteArrayInputStream(code.getBytes(StandardCharsets.UTF_8))) {
-            dockerClient.copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(codeStream)
-                    .withRemotePath(SANDBOX_WORK_DIR)
-                    .exec();
-            log.debug("Code copied to container {}, file: {}", containerId, fileName);
+        try {
+            byte[] tarBytes = createTarArchive(code, fileName);
+            try (InputStream tarStream = new ByteArrayInputStream(tarBytes)) {
+                dockerClient.copyArchiveToContainerCmd(containerId)
+                        .withTarInputStream(tarStream)
+                        .withRemotePath(SANDBOX_WORK_DIR)
+                        .exec();
+            }
+            log.debug("Code copied to container {}, file: {}, size: {} bytes",
+                    containerId, fileName, tarBytes.length);
         } catch (Exception e) {
             throw new RuntimeException("Failed to copy code to container", e);
         }
+    }
+
+    /**
+     * 创建包含单个文件的 tar 归档。
+     */
+    private byte[] createTarArchive(String content, String fileName) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (TarArchiveOutputStream tarOut = new TarArchiveOutputStream(baos)) {
+            tarOut.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX);
+
+            byte[] contentBytes = content.getBytes(StandardCharsets.UTF_8);
+            TarArchiveEntry entry = new TarArchiveEntry(fileName);
+            entry.setSize(contentBytes.length);
+            tarOut.putArchiveEntry(entry);
+            tarOut.write(contentBytes);
+            tarOut.closeArchiveEntry();
+        }
+        return baos.toByteArray();
     }
 
     /**
@@ -249,14 +294,15 @@ public class SandboxRuntime {
      */
     private String resolveImage(String language) {
         if (language == null) {
-            return IMAGE_PYTHON;
+            return imagePython;
         }
         return switch (language.toLowerCase()) {
-            case "python", "py" -> IMAGE_PYTHON;
-            case "javascript", "js", "node" -> IMAGE_NODE;
+            case "python", "py" -> imagePython;
+            case "javascript", "js", "node" -> imageNode;
+            case "java" -> imageJava;
             default -> {
                 log.warn("Unsupported language '{}', defaulting to Python", language);
-                yield IMAGE_PYTHON;
+                yield imagePython;
             }
         };
     }
@@ -271,6 +317,10 @@ public class SandboxRuntime {
         return switch (language.toLowerCase()) {
             case "python", "py" -> new String[]{"python3", SANDBOX_WORK_DIR + "/main.py"};
             case "javascript", "js", "node" -> new String[]{"node", SANDBOX_WORK_DIR + "/main.js"};
+            case "java" -> new String[]{"sh", "-c",
+                    "cp " + SANDBOX_WORK_DIR + "/Main.java /tmp/Main.java && " +
+                    "javac /tmp/Main.java -d /tmp && " +
+                    "java -cp /tmp Main"};
             default -> new String[]{"python3", SANDBOX_WORK_DIR + "/main.py"};
         };
     }
@@ -285,7 +335,41 @@ public class SandboxRuntime {
         return switch (language.toLowerCase()) {
             case "python", "py" -> "main.py";
             case "javascript", "js", "node" -> "main.js";
+            case "java" -> "Main.java";
             default -> "main.py";
         };
+    }
+
+    /**
+     * 解析内存限制字符串为字节数。
+     * 支持格式: "512m", "1g", "256MB", "1GB" 等
+     */
+    private long parseMemoryLimit(String memoryStr) {
+        if (memoryStr == null || memoryStr.isBlank()) {
+            return 512 * 1024 * 1024L; // 默认 512MB
+        }
+
+        String str = memoryStr.trim().toLowerCase();
+        long multiplier = 1;
+
+        if (str.endsWith("g") || str.endsWith("gb")) {
+            str = str.replaceAll("[^0-9]", "");
+            multiplier = 1024L * 1024 * 1024;
+        } else if (str.endsWith("m") || str.endsWith("mb")) {
+            str = str.replaceAll("[^0-9]", "");
+            multiplier = 1024L * 1024;
+        } else if (str.endsWith("k") || str.endsWith("kb")) {
+            str = str.replaceAll("[^0-9]", "");
+            multiplier = 1024L;
+        } else {
+            str = str.replaceAll("[^0-9]", "");
+        }
+
+        try {
+            return Long.parseLong(str) * multiplier;
+        } catch (NumberFormatException e) {
+            log.warn("Invalid memory limit '{}', using default 512MB", memoryStr);
+            return 512 * 1024 * 1024L;
+        }
     }
 }

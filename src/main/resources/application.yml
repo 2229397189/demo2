@@ -101,7 +101,7 @@ milvus:
 
 # Elasticsearch
 spring.elasticsearch:
-  uris: ${ELASTICSEARCH_URIS:localhost:9200}
+  uris: ${ELASTICSEARCH_URIS:localhost:9201}
   username: ${ELASTICSEARCH_USERNAME:}
   password: ${ELASTICSEARCH_PASSWORD:}
   connection-timeout: 5000
@@ -112,7 +112,7 @@ neo4j:
   uri: bolt://localhost:7687
   authentication:
     username: ${NEO4J_USERNAME:neo4j}
-    password: ${NEO4J_PASSWORD:neo4j}
+    password: ${NEO4J_PASSWORD:neo4j123456}
   max-connection-pool-size: 100
   connection-acquisition-timeout: 60
 
@@ -160,4 +160,9 @@ springdoc:
   group-configs:
     - group: default
       display-name: AGI Assistant API
-      paths-to-match: /api/v1/**
+      paths-to-match: /api/**
+
+# Logging
+logging:
+  level:
+    io.milvus.client.AbstractMilvusGrpcClient: WARN

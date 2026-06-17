@@ -47,9 +47,9 @@ public class BM25Service {
     /** Default index name */
     private static final String DEFAULT_INDEX = "rag_documents";
 
-    /** IK Chinese analyzers */
-    private static final String IK_ANALYZER = "ik_max_word";
-    private static final String IK_SEARCH_ANALYZER = "ik_smart";
+    /** Chinese analyzers (standard fallback when IK plugin is not installed) */
+    private static final String IK_ANALYZER = "standard";
+    private static final String IK_SEARCH_ANALYZER = "standard";
 
     /** Batch size for bulk indexing */
     private static final int BULK_BATCH_SIZE = 100;
@@ -122,9 +122,8 @@ public class BM25Service {
                 log.error("Index [{}] creation not acknowledged", indexName);
             }
 
-        } catch (IOException e) {
-            log.error("Failed to create index [{}]: {}", indexName, e.getMessage(), e);
-            throw new RuntimeException("Failed to create Elasticsearch index", e);
+        } catch (Exception e) {
+            log.warn("Failed to create index [{}], ES may be unavailable: {}", indexName, e.getMessage());
         }
     }
 
@@ -153,9 +152,8 @@ public class BM25Service {
             esClient.indices().delete(DeleteIndexRequest.of(d -> d.index(indexName)));
             log.info("Index [{}] deleted", indexName);
 
-        } catch (IOException e) {
-            log.error("Failed to delete index [{}]: {}", indexName, e.getMessage(), e);
-            throw new RuntimeException("Failed to delete Elasticsearch index", e);
+        } catch (Exception e) {
+            log.warn("Failed to delete index [{}], ES may be unavailable: {}", indexName, e.getMessage());
         }
     }
 
