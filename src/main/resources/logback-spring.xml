@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+    <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+
+    <!-- TurboFilter: suppress Milvus SDK ERROR logs before they are created -->
+    <turboFilter class="ch.qos.logback.classic.turbo.MarkerFilter">
+        <Marker>FLOW_MARKER</Marker>
+        <OnMatch>DENY</OnMatch>
+    </turboFilter>
+
+    <!-- Suppress Milvus SDK internal connection errors (expected when Milvus is down) -->
+    <logger name="io.milvus.client.AbstractMilvusGrpcClient" level="OFF"/>
+    <logger name="io.milvus" level="WARN"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>
