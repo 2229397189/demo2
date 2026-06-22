@@ -11,7 +11,7 @@ public class ChatRequest {
 
     private boolean useMemory = false;
 
-    private String retrievalStrategy = "NONE";
+    private String retrievalStrategy = "HYBRID";
 
     private boolean stream = true;
 }

@@ -145,7 +145,7 @@ const chatStore = useChatStore()
 const router = useRouter()
 const searchText = ref('')
 const inputMessage = ref('')
-const retrievalStrategy = ref<'none' | 'dense' | 'sparse' | 'graph' | 'hybrid'>('none')
+const retrievalStrategy = ref<'none' | 'dense' | 'sparse' | 'graph' | 'hybrid'>('hybrid')
 const useMemory = ref(false)
 
 const filteredSessions = computed(() => {

@@ -97,7 +97,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function sendMessage(
     content: string,
-    retrievalStrategy: 'none' | 'dense' | 'sparse' | 'graph' | 'hybrid' = 'none',
+    retrievalStrategy: 'none' | 'dense' | 'sparse' | 'graph' | 'hybrid' = 'hybrid',
     useMemory = false
   ) {
     if (!currentSession.value || isStreaming.value) return
