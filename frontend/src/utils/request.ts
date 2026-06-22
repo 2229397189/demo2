@@ -12,6 +12,13 @@ const service: AxiosInstance = axios.create({
 
 service.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
+    if (config.data instanceof FormData && config.headers) {
+      const headers = config.headers as Record<string, unknown> & { delete?: (name: string) => boolean }
+      headers.delete?.('Content-Type')
+      delete headers['Content-Type']
+      delete headers['content-type']
+    }
+
     const token = localStorage.getItem('token')
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`

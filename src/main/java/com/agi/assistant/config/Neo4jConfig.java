@@ -12,6 +12,8 @@ import org.springframework.context.annotation.Configuration;
 
 import jakarta.annotation.PreDestroy;
 
+import java.util.concurrent.TimeUnit;
+
 @Slf4j
 @Data
 @Configuration
@@ -21,8 +23,10 @@ public class Neo4jConfig {
 
     private String uri;
     private Authentication authentication = new Authentication();
-    private int maxConnectionPoolSize;
-    private long connectionAcquisitionTimeout;
+    private int maxConnectionPoolSize = 5;
+    private long connectionAcquisitionTimeout = 5;
+    private long connectionTimeout = 5;
+    private long maxTransactionRetryTime = 5;
 
     @Data
     public static class Authentication {
@@ -41,12 +45,12 @@ public class Neo4jConfig {
                             authentication.getUsername() != null ? authentication.getUsername() : "neo4j",
                             authentication.getPassword() != null ? authentication.getPassword() : "neo4j123456"),
                     org.neo4j.driver.Config.builder()
-                            .withMaxConnectionPoolSize(maxConnectionPoolSize > 0 ? maxConnectionPoolSize : 100)
+                            .withMaxConnectionPoolSize(maxConnectionPoolSize > 0 ? maxConnectionPoolSize : 5)
                             .withConnectionAcquisitionTimeout(
-                                    connectionAcquisitionTimeout > 0 ? connectionAcquisitionTimeout * 1000 : 30000,
-                                    java.util.concurrent.TimeUnit.MILLISECONDS)
-                            .withConnectionTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                            .withMaxTransactionRetryTime(30, java.util.concurrent.TimeUnit.SECONDS)
+                                    connectionAcquisitionTimeout > 0 ? connectionAcquisitionTimeout : 5,
+                                    TimeUnit.SECONDS)
+                            .withConnectionTimeout(connectionTimeout > 0 ? connectionTimeout : 5, TimeUnit.SECONDS)
+                            .withMaxTransactionRetryTime(maxTransactionRetryTime > 0 ? maxTransactionRetryTime : 5, TimeUnit.SECONDS)
                             .build()
             );
 

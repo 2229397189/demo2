@@ -190,9 +190,8 @@ public class BM25Service {
 
             log.debug("Indexed document [{}] to [{}]", id, indexName);
 
-        } catch (IOException e) {
-            log.error("Failed to index document [{}]: {}", id, e.getMessage(), e);
-            throw new RuntimeException("Failed to index document to Elasticsearch", e);
+        } catch (Exception e) {
+            log.warn("Skipping BM25 index for document [{}], Elasticsearch unavailable: {}", id, e.getMessage());
         }
     }
 

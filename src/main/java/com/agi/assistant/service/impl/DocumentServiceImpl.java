@@ -231,15 +231,24 @@ public class DocumentServiceImpl implements DocumentService {
                     .collect(Collectors.toList());
 
             // 使用批量 embedding 提高性能
-            List<List<Float>> embeddings = embeddingService.embedBatch(chunkContents);
-            log.info("Generated {} embeddings for document [{}]", embeddings.size(), id);
+            List<List<Float>> embeddings = List.of();
+            if (milvusService.isAvailable()) {
+                try {
+                    embeddings = embeddingService.embedBatch(chunkContents);
+                    log.info("Generated {} embeddings for document [{}]", embeddings.size(), id);
+                } catch (Exception e) {
+                    log.warn("Embedding generation failed for document [{}], vector index will be skipped: {}",
+                            id, e.getMessage());
+                }
+            } else {
+                log.info("Milvus is disabled, skipping embeddings for document [{}]", id);
+            }
 
             // 5. Index into Milvus
             log.info("Step 4/4: Indexing document [{}] into vector store and BM25", id);
             List<String> milvusIds = new ArrayList<>();
             List<String> documentIds = new ArrayList<>();
             List<Long> chunkIndices = new ArrayList<>();
-            List<String> bm25Contents = new ArrayList<>();
 
             for (int i = 0; i < chunks.size(); i++) {
                 DocumentChunk chunk = chunks.get(i);
@@ -251,8 +260,10 @@ public class DocumentServiceImpl implements DocumentService {
                 chunk.setVectorId(chunkId);
                 chunk.setDocumentId(id);
                 chunk.setCreatedAt(LocalDateTime.now());
-                bm25Contents.add(chunk.getContent());
             }
+
+            documentChunkMapper.delete(new LambdaQueryWrapper<DocumentChunk>()
+                    .eq(DocumentChunk::getDocumentId, id));
 
             // Persist chunks to database
             for (DocumentChunk chunk : chunks) {
@@ -260,15 +271,30 @@ public class DocumentServiceImpl implements DocumentService {
             }
 
             // Insert into Milvus
-            milvusService.insertVectors(milvusIds, documentIds, chunkIndices, chunkContents, embeddings);
+            if (milvusService.isAvailable() && embeddings.size() == chunks.size()
+                    && embeddings.stream().allMatch(vector -> vector != null && !vector.isEmpty())) {
+                try {
+                    milvusService.insertVectors(milvusIds, documentIds, chunkIndices, chunkContents, embeddings);
+                } catch (Exception e) {
+                    log.warn("Milvus indexing failed for document [{}], dense retrieval will be unavailable: {}",
+                            id, e.getMessage());
+                }
+            } else {
+                log.info("Skipping Milvus indexing for document [{}]", id);
+            }
 
             // Index into BM25 (Elasticsearch)
-            for (int i = 0; i < chunks.size(); i++) {
-                List<String> tags = document.getTags() != null
-                        ? List.of(document.getTags().split(",")) : List.of();
-                bm25Service.indexDocument(
-                        milvusIds.get(i), documentIdStr, i,
-                        document.getTitle(), chunks.get(i).getContent(), tags);
+            try {
+                for (int i = 0; i < chunks.size(); i++) {
+                    List<String> tags = document.getTags() != null
+                            ? List.of(document.getTags().split(",")) : List.of();
+                    bm25Service.indexDocument(
+                            milvusIds.get(i), documentIdStr, i,
+                            document.getTitle(), chunks.get(i).getContent(), tags);
+                }
+            } catch (Exception e) {
+                log.warn("BM25 indexing failed for document [{}], sparse retrieval will be unavailable: {}",
+                        id, e.getMessage());
             }
 
             // Update document status
