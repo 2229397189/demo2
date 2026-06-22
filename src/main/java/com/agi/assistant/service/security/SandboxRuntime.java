@@ -4,46 +4,36 @@ import com.agi.assistant.model.dto.SandboxExecuteResponse;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CreateContainerResponse;
+import com.github.dockerjava.api.command.WaitContainerResultCallback;
+import com.github.dockerjava.api.exception.DockerClientException;
 import com.github.dockerjava.api.exception.DockerException;
-import com.github.dockerjava.api.model.*;
+import com.github.dockerjava.api.model.Capability;
+import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.HostConfig;
+import com.github.dockerjava.api.model.StreamType;
 import com.github.dockerjava.core.DefaultDockerClientConfig;
 import com.github.dockerjava.core.DockerClientConfig;
 import com.github.dockerjava.core.DockerClientImpl;
-import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
 import com.github.dockerjava.transport.DockerHttpClient;
+import com.github.dockerjava.zerodep.ZerodepDockerHttpClient;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Base64;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Docker 沙箱运行时
- * <p>
- * 在隔离的 Docker 容器中执行用户提交的代码，安全配置如下：
- * <ul>
- *   <li>网络隔离：network=none</li>
- *   <li>只读文件系统：read_only=true</li>
- *   <li>移除所有 Linux capabilities：cap_drop=ALL</li>
- *   <li>禁止提权：no_new_privileges</li>
- *   <li>内存限制：可配置（默认 512MB）</li>
- *   <li>CPU 限制：可配置（默认 1.0 核）</li>
- *   <li>执行超时：可配置（默认 60 秒）</li>
- * </ul>
- */
 @Slf4j
 @Service
 public class SandboxRuntime {
 
     private static final String SANDBOX_WORK_DIR = "/sandbox";
+    private static final int TIMEOUT_EXIT_CODE = 124;
 
     private final String imagePython;
     private final String imageNode;
@@ -63,21 +53,19 @@ public class SandboxRuntime {
             @Value("${sandbox.docker.timeout-seconds:60}") long defaultTimeoutSeconds,
             @Value("${sandbox.docker.memory-limit:512m}") String memoryLimitStr,
             @Value("${sandbox.docker.cpu-limit:1.0}") double cpuLimit) {
-        this.dockerHost = dockerHost;
+        this.dockerHost = resolveDockerHost(dockerHost);
         this.imagePython = imagePython;
         this.imageNode = imageNode;
         this.imageJava = imageJava;
         this.defaultTimeoutSeconds = defaultTimeoutSeconds;
         this.cpuLimit = cpuLimit;
-
-        // Parse memory limit string (e.g., "512m" -> bytes)
         this.memoryLimit = parseMemoryLimit(memoryLimitStr);
 
         DockerClientConfig config = DefaultDockerClientConfig.createDefaultConfigBuilder()
-                .withDockerHost(dockerHost)
+                .withDockerHost(this.dockerHost)
                 .build();
 
-        DockerHttpClient httpClient = new ApacheDockerHttpClient.Builder()
+        DockerHttpClient httpClient = new ZerodepDockerHttpClient.Builder()
                 .dockerHost(config.getDockerHost())
                 .maxConnections(10)
                 .connectionTimeout(Duration.ofSeconds(30))
@@ -85,92 +73,102 @@ public class SandboxRuntime {
                 .build();
 
         this.dockerClient = DockerClientImpl.getInstance(config, httpClient);
+        log.info("Sandbox Docker client initialized with host {}", this.dockerHost);
     }
 
-    /**
-     * 在沙箱中执行代码。
-     *
-     * @param language 编程语言（python / node）
-     * @param code     要执行的代码
-     * @param timeout  超时时间（秒），0 表示使用默认值
-     * @return 执行结果
-     */
     public SandboxExecuteResponse executeCode(String language, String code, int timeout) {
         long actualTimeout = timeout > 0 ? timeout : defaultTimeoutSeconds;
         String containerId = null;
         long startTime = System.currentTimeMillis();
 
         try {
-            // 1. 根据语言选择镜像
             String image = resolveImage(language);
+            String encodedCode = Base64.getEncoder()
+                    .encodeToString((code != null ? code : "").getBytes(StandardCharsets.UTF_8));
+            containerId = createSecureContainer(image, language, encodedCode);
 
-            // 2. 创建安全容器
-            containerId = createSecureContainer(image, language);
-
-            // 3. 将代码复制到容器中（tar 归档格式）
-            String fileName = resolveFileName(language);
-            copyCodeToContainer(containerId, code, fileName);
-
-            // 4. 启动容器执行代码
             dockerClient.startContainerCmd(containerId).exec();
 
-            // 5. 等待容器完成（带超时）
-            boolean finished = dockerClient.waitContainerCmd(containerId)
-                    .start()
-                    .awaitStarted(actualTimeout, TimeUnit.SECONDS);
+            WaitContainerResultCallback waitCallback = dockerClient.waitContainerCmd(containerId).start();
+            Integer statusCode = null;
+            boolean finished;
+            try {
+                statusCode = waitCallback.awaitStatusCode(actualTimeout, TimeUnit.SECONDS);
+                finished = statusCode != null;
+            } catch (DockerClientException e) {
+                if (!isAwaitTimeout(e)) {
+                    throw e;
+                }
+                finished = false;
+            }
 
-            // 6. 收集输出
             String output = "";
             String error = "";
+            int exitCode = finished ? statusCode : TIMEOUT_EXIT_CODE;
 
             if (finished) {
                 output = collectStdout(containerId);
                 error = collectStderr(containerId);
             } else {
+                stopContainer(containerId);
                 error = "Execution timed out after " + actualTimeout + " seconds";
             }
 
             long executionTime = System.currentTimeMillis() - startTime;
-            return new SandboxExecuteResponse(output, error, executionTime);
-
+            return new SandboxExecuteResponse(output, error, executionTime, exitCode, 0);
         } catch (Exception e) {
             log.error("Sandbox execution failed: {}", e.getMessage(), e);
             long executionTime = System.currentTimeMillis() - startTime;
-            return new SandboxExecuteResponse("", "Sandbox error: " + e.getMessage(), executionTime);
-
+            return new SandboxExecuteResponse("", "Sandbox error: " + e.getMessage(), executionTime, 1, 0);
         } finally {
-            // 7. 清理容器
             if (containerId != null) {
                 removeContainer(containerId);
             }
         }
     }
 
-    /**
-     * 创建安全沙箱容器。
-     */
-    private String createSecureContainer(String image, String language) {
+    private String resolveDockerHost(String configuredDockerHost) {
+        String envDockerHost = System.getenv("DOCKER_HOST");
+        if (envDockerHost != null && !envDockerHost.isBlank()) {
+            return envDockerHost;
+        }
+
+        if (isWindows() && (configuredDockerHost == null
+                || configuredDockerHost.isBlank()
+                || configuredDockerHost.startsWith("unix://"))) {
+            return "npipe:////./pipe/dockerDesktopLinuxEngine";
+        }
+
+        return configuredDockerHost != null && !configuredDockerHost.isBlank()
+                ? configuredDockerHost
+                : "unix:///var/run/docker.sock";
+    }
+
+    private boolean isWindows() {
+        return System.getProperty("os.name", "")
+                .toLowerCase(Locale.ROOT)
+                .contains("win");
+    }
+
+    private String createSecureContainer(String image, String language, String encodedCode) {
         HostConfig hostConfig = HostConfig.newHostConfig()
-                .withNetworkMode("none")                         // 无网络
-                .withReadonlyRootfs(true)                        // 只读文件系统
-                .withCapDrop(Capability.ALL)                     // 移除所有 capabilities
-                .withSecurityOpts(java.util.List.of("no-new-privileges:true"))  // 禁止提权
-                .withMemory(memoryLimit)                         // 内存限制
-                .withCpuQuota((long) (cpuLimit * 100000))        // CPU 限制
+                .withNetworkMode("none")
+                .withReadonlyRootfs(true)
+                .withCapDrop(Capability.ALL)
+                .withSecurityOpts(java.util.List.of("no-new-privileges:true"))
+                .withMemory(memoryLimit)
+                .withCpuQuota((long) (cpuLimit * 100000))
+                .withTmpFs(Map.of(
+                        SANDBOX_WORK_DIR, "size=256m",
+                        "/tmp", "size=128m"
+                ))
                 .withAutoRemove(false);
-
-        // 创建 tmpfs 挂载以支持可写临时目录
-        hostConfig.withTmpFs(java.util.Map.of(
-                SANDBOX_WORK_DIR, "size=256m",
-                "/tmp", "size=128m"
-        ));
-
-        String[] command = resolveCommand(language);
 
         CreateContainerResponse container = dockerClient.createContainerCmd(image)
                 .withHostConfig(hostConfig)
                 .withWorkingDir(SANDBOX_WORK_DIR)
-                .withCmd(command)
+                .withCmd(resolveCommand(language))
+                .withEnv("SANDBOX_CODE_B64=" + encodedCode)
                 .withAttachStdout(true)
                 .withAttachStderr(true)
                 .withNetworkDisabled(true)
@@ -181,46 +179,6 @@ public class SandboxRuntime {
         return containerId;
     }
 
-    /**
-     * 将代码文件复制到容器中（创建 tar 归档）。
-     */
-    private void copyCodeToContainer(String containerId, String code, String fileName) {
-        try {
-            byte[] tarBytes = createTarArchive(code, fileName);
-            try (InputStream tarStream = new ByteArrayInputStream(tarBytes)) {
-                dockerClient.copyArchiveToContainerCmd(containerId)
-                        .withTarInputStream(tarStream)
-                        .withRemotePath(SANDBOX_WORK_DIR)
-                        .exec();
-            }
-            log.debug("Code copied to container {}, file: {}, size: {} bytes",
-                    containerId, fileName, tarBytes.length);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to copy code to container", e);
-        }
-    }
-
-    /**
-     * 创建包含单个文件的 tar 归档。
-     */
-    private byte[] createTarArchive(String content, String fileName) throws IOException {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (TarArchiveOutputStream tarOut = new TarArchiveOutputStream(baos)) {
-            tarOut.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX);
-
-            byte[] contentBytes = content.getBytes(StandardCharsets.UTF_8);
-            TarArchiveEntry entry = new TarArchiveEntry(fileName);
-            entry.setSize(contentBytes.length);
-            tarOut.putArchiveEntry(entry);
-            tarOut.write(contentBytes);
-            tarOut.closeArchiveEntry();
-        }
-        return baos.toByteArray();
-    }
-
-    /**
-     * 收集容器的标准输出。
-     */
     private String collectStdout(String containerId) {
         try {
             ByteArrayOutputStream stdout = new ByteArrayOutputStream();
@@ -246,9 +204,6 @@ public class SandboxRuntime {
         }
     }
 
-    /**
-     * 收集容器的标准错误输出。
-     */
     private String collectStderr(String containerId) {
         try {
             ByteArrayOutputStream stderr = new ByteArrayOutputStream();
@@ -274,9 +229,21 @@ public class SandboxRuntime {
         }
     }
 
-    /**
-     * 移除容器。
-     */
+    private void stopContainer(String containerId) {
+        try {
+            dockerClient.stopContainerCmd(containerId)
+                    .withTimeout(1)
+                    .exec();
+        } catch (DockerException e) {
+            log.warn("Failed to stop timed out container {}: {}", containerId, e.getMessage());
+        }
+    }
+
+    private boolean isAwaitTimeout(DockerClientException e) {
+        String message = e.getMessage();
+        return message != null && message.toLowerCase(Locale.ROOT).contains("timeout");
+    }
+
     private void removeContainer(String containerId) {
         try {
             dockerClient.removeContainerCmd(containerId)
@@ -289,14 +256,11 @@ public class SandboxRuntime {
         }
     }
 
-    /**
-     * 根据语言选择镜像。
-     */
     private String resolveImage(String language) {
         if (language == null) {
             return imagePython;
         }
-        return switch (language.toLowerCase()) {
+        return switch (language.toLowerCase(Locale.ROOT)) {
             case "python", "py" -> imagePython;
             case "javascript", "js", "node" -> imageNode;
             case "java" -> imageJava;
@@ -307,49 +271,36 @@ public class SandboxRuntime {
         };
     }
 
-    /**
-     * 根据语言生成执行命令。
-     */
     private String[] resolveCommand(String language) {
         if (language == null) {
-            return new String[]{"python3", SANDBOX_WORK_DIR + "/main.py"};
+            return new String[]{"sh", "-c", writeCodeCommand("main.py") + " && python3 " + SANDBOX_WORK_DIR + "/main.py"};
         }
-        return switch (language.toLowerCase()) {
-            case "python", "py" -> new String[]{"python3", SANDBOX_WORK_DIR + "/main.py"};
-            case "javascript", "js", "node" -> new String[]{"node", SANDBOX_WORK_DIR + "/main.js"};
+        return switch (language.toLowerCase(Locale.ROOT)) {
+            case "python", "py" ->
+                    new String[]{"sh", "-c", writeCodeCommand("main.py") + " && python3 " + SANDBOX_WORK_DIR + "/main.py"};
+            case "javascript", "js", "node" ->
+                    new String[]{"sh", "-c", writeCodeCommand("main.js") + " && node " + SANDBOX_WORK_DIR + "/main.js"};
             case "java" -> new String[]{"sh", "-c",
-                    "cp " + SANDBOX_WORK_DIR + "/Main.java /tmp/Main.java && " +
-                    "javac /tmp/Main.java -d /tmp && " +
-                    "java -cp /tmp Main"};
-            default -> new String[]{"python3", SANDBOX_WORK_DIR + "/main.py"};
+                    writeCodeCommand("Main.java") + " && "
+                            + "cp " + SANDBOX_WORK_DIR + "/Main.java /tmp/Main.java && "
+                            + "javac /tmp/Main.java -d /tmp && "
+                            + "java -cp /tmp Main"};
+            default ->
+                    new String[]{"sh", "-c", writeCodeCommand("main.py") + " && python3 " + SANDBOX_WORK_DIR + "/main.py"};
         };
     }
 
-    /**
-     * 根据语言确定文件名。
-     */
-    private String resolveFileName(String language) {
-        if (language == null) {
-            return "main.py";
-        }
-        return switch (language.toLowerCase()) {
-            case "python", "py" -> "main.py";
-            case "javascript", "js", "node" -> "main.js";
-            case "java" -> "Main.java";
-            default -> "main.py";
-        };
+    private String writeCodeCommand(String fileName) {
+        String filePath = SANDBOX_WORK_DIR + "/" + fileName;
+        return "printf '%s' \"$SANDBOX_CODE_B64\" | base64 -d > " + filePath;
     }
 
-    /**
-     * 解析内存限制字符串为字节数。
-     * 支持格式: "512m", "1g", "256MB", "1GB" 等
-     */
     private long parseMemoryLimit(String memoryStr) {
         if (memoryStr == null || memoryStr.isBlank()) {
-            return 512 * 1024 * 1024L; // 默认 512MB
+            return 512 * 1024 * 1024L;
         }
 
-        String str = memoryStr.trim().toLowerCase();
+        String str = memoryStr.trim().toLowerCase(Locale.ROOT);
         long multiplier = 1;
 
         if (str.endsWith("g") || str.endsWith("gb")) {

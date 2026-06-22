@@ -4,9 +4,8 @@ import type { Result, PageResult, Document } from '@/types'
 export function uploadDocument(file: File): Promise<Result<Document>> {
   const formData = new FormData()
   formData.append('file', file)
-  return request.post('/documents/upload', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  })
+  // 不要手动设置 Content-Type，让浏览器自动添加 boundary 参数
+  return request.post('/documents/upload', formData)
 }
 
 export function listDocuments(page = 1, size = 20): Promise<Result<PageResult<Document>>> {

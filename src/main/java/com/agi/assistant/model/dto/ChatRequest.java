@@ -9,7 +9,9 @@ public class ChatRequest {
 
     private Long sessionId;
 
-    private boolean useMemory;
+    private boolean useMemory = false;
 
-    private String retrievalStrategy;
+    private String retrievalStrategy = "NONE";
+
+    private boolean stream = true;
 }

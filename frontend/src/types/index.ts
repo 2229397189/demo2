@@ -19,6 +19,11 @@ export interface ChatSession {
   messageCount: number
 }
 
+export interface ThinkingStep {
+  step: string
+  message: string
+}
+
 export interface ChatMessage {
   id: string
   sessionId: string
@@ -27,6 +32,7 @@ export interface ChatMessage {
   sources?: SourceReference[]
   webResults?: SourceReference[]
   sandboxResults?: SandboxExecution[]
+  thinkingSteps?: ThinkingStep[]
   createdAt: string
 }
 
@@ -45,7 +51,7 @@ export interface SourceReference {
 export interface ChatRequest {
   sessionId: string
   message: string
-  retrievalStrategy: 'dense' | 'sparse' | 'graph' | 'hybrid'
+  retrievalStrategy: 'none' | 'dense' | 'sparse' | 'graph' | 'hybrid'
   useMemory: boolean
   stream: boolean
 }

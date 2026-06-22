@@ -24,6 +24,7 @@ export interface StreamCallbacks {
   onSource?: (sources: SourceReference[]) => void
   onWebSearch?: (results: SourceReference[]) => void
   onSandbox?: (result: SandboxExecution) => void
+  onThinking?: (step: string, message: string) => void
 }
 
 export function streamChat(
@@ -36,7 +37,7 @@ export function streamChat(
   fetch('/api/chat/stream', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json;charset=UTF-8',
       'X-User-Id': userId,
     },
     body: JSON.stringify(req),
@@ -91,6 +92,8 @@ export function streamChat(
                 callbacks.onWebSearch(parsed.content || parsed)
               } else if (currentEvent === 'source' && callbacks.onSource) {
                 callbacks.onSource(parsed.content || parsed)
+              } else if (currentEvent === 'thinking' && callbacks.onThinking) {
+                callbacks.onThinking(parsed.step, parsed.message)
               } else if (currentEvent === 'content' || parsed.type === 'content') {
                 callbacks.onMessage(parsed.content || parsed)
               } else if (parsed.type === 'done') {

@@ -114,13 +114,22 @@ public class ChatServiceImpl implements ChatService {
             String strategy = request.getRetrievalStrategy() != null
                     ? request.getRetrievalStrategy() : "HYBRID";
             try {
+                // 发送思考过程：开始检索
+                sendThinkingEvent(emitter, "retrieval", "正在检索知识库...");
+
                 searchResults = hybridRetrievalService.retrieve(
                         request.getMessage(), strategy, 5);
                 if (!searchResults.isEmpty()) {
+                    // 使用 Map 对象，让 Spring 自动序列化
+                    Map<String, Object> sourceData = new HashMap<>();
+                    sourceData.put("type", "source");
+                    sourceData.put("content", searchResults);
                     emitter.send(SseEmitter.event()
                             .name("source")
-                            .data(objectMapper.writeValueAsString(
-                                    ChatStreamEvent.source(searchResults))));
+                            .data(sourceData));
+                    // 发送思考过程：检索完成
+                    sendThinkingEvent(emitter, "retrieval_done",
+                            "检索到 " + searchResults.size() + " 条相关内容");
                 }
             } catch (Exception e) {
                 log.warn("RAG retrieval failed, continuing without context: {}", e.getMessage());
@@ -130,12 +139,19 @@ public class ChatServiceImpl implements ChatService {
             List<SearchResult> webResults = new ArrayList<>();
             if (needsWebSearch(request.getMessage())) {
                 try {
+                    sendThinkingEvent(emitter, "websearch", "正在搜索网络...");
+
                     webResults = webSearchService.search(request.getMessage(), 5);
                     if (!webResults.isEmpty()) {
+                        // 使用 Map 对象，让 Spring 自动序列化
+                        Map<String, Object> webData = new HashMap<>();
+                        webData.put("type", "websearch");
+                        webData.put("content", webResults);
                         emitter.send(SseEmitter.event()
                                 .name("websearch")
-                                .data(objectMapper.writeValueAsString(
-                                        ChatStreamEvent.source(webResults))));
+                                .data(webData));
+                        sendThinkingEvent(emitter, "websearch_done",
+                                "网络搜索完成，找到 " + webResults.size() + " 条结果");
                         log.info("Web search returned {} results for query", webResults.size());
                     }
                 } catch (Exception e) {
@@ -147,11 +163,18 @@ public class ChatServiceImpl implements ChatService {
             Map<String, Object> context = new HashMap<>();
             if (request.isUseMemory()) {
                 try {
+                    sendThinkingEvent(emitter, "memory", "正在查询记忆系统...");
+
                     context = contextAssembly.assembleContext(userId, request.getMessage());
+
+                    sendThinkingEvent(emitter, "memory_done", "记忆查询完成");
                 } catch (Exception e) {
                     log.warn("Memory assembly failed: {}", e.getMessage());
                 }
             }
+
+            // 发送思考过程：开始生成
+            sendThinkingEvent(emitter, "generation", "正在生成回答...");
 
             // Merge all search results for system prompt
             List<SearchResult> allResults = new ArrayList<>(searchResults);
@@ -235,6 +258,10 @@ public class ChatServiceImpl implements ChatService {
                                     assistantMessage.setCreatedAt(LocalDateTime.now());
                                     chatMessageMapper.insert(assistantMessage);
                                 }
+
+                                // 9. Send completion thinking event
+                                sendThinkingEvent(emitter, "done", "回答完成");
+
                                 emitter.complete();
                             } catch (Exception e) {
                                 log.error("Error completing stream: {}", e.getMessage(), e);
@@ -334,10 +361,13 @@ public class ChatServiceImpl implements ChatService {
             String content = extractTextContent(delta.path("content"));
             if (content != null) {
                 fullResponse.get().append(content);
+                // 使用 Map 对象，让 Spring 自动序列化
+                Map<String, Object> eventData = new HashMap<>();
+                eventData.put("type", "content");
+                eventData.put("content", content);
                 emitter.send(SseEmitter.event()
                         .name("content")
-                        .data(objectMapper.writeValueAsString(
-                                ChatStreamEvent.content(content))));
+                        .data(eventData));
             }
         }
     }
@@ -354,6 +384,19 @@ public class ChatServiceImpl implements ChatService {
             }
         }
         return false;
+    }
+
+    /**
+     * Send a thinking event via SSE.
+     */
+    private void sendThinkingEvent(SseEmitter emitter, String step, String message) throws IOException {
+        // 使用 Map 对象，让 Spring 自动序列化
+        Map<String, Object> eventData = new HashMap<>();
+        eventData.put("step", step);
+        eventData.put("message", message);
+        emitter.send(SseEmitter.event()
+                .name("thinking")
+                .data(eventData));
     }
 
     /**
@@ -393,7 +436,7 @@ public class ChatServiceImpl implements ChatService {
 
                 emitter.send(SseEmitter.event()
                         .name("sandbox")
-                        .data(objectMapper.writeValueAsString(sandboxEvent)));
+                        .data(sandboxEvent));
 
                 log.info("Sandbox execution completed: exitCode={}, time={}ms",
                         response.getExitCode(), response.getExecutionTime());
@@ -407,7 +450,7 @@ public class ChatServiceImpl implements ChatService {
                     errorEvent.put("exitCode", -1);
                     emitter.send(SseEmitter.event()
                             .name("sandbox")
-                            .data(objectMapper.writeValueAsString(errorEvent)));
+                            .data(errorEvent));
                 } catch (Exception ignored) {}
             }
         }

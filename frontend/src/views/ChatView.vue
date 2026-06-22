@@ -49,6 +49,7 @@
         <h3>{{ chatStore.currentSession.title }}</h3>
         <div class="chat-controls">
           <el-select v-model="retrievalStrategy" size="small" style="width: 140px">
+            <el-option label="纯文本" value="none" />
             <el-option label="混合检索" value="hybrid" />
             <el-option label="稠密检索" value="dense" />
             <el-option label="稀疏检索" value="sparse" />
@@ -144,8 +145,8 @@ const chatStore = useChatStore()
 const router = useRouter()
 const searchText = ref('')
 const inputMessage = ref('')
-const retrievalStrategy = ref<'dense' | 'sparse' | 'graph' | 'hybrid'>('hybrid')
-const useMemory = ref(true)
+const retrievalStrategy = ref<'none' | 'dense' | 'sparse' | 'graph' | 'hybrid'>('none')
+const useMemory = ref(false)
 
 const filteredSessions = computed(() => {
   if (!searchText.value) return chatStore.sortedSessions

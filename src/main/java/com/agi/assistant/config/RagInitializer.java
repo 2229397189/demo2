@@ -6,6 +6,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
@@ -13,6 +14,7 @@ import org.springframework.stereotype.Component;
 @Order(10)
 @Component
 @RequiredArgsConstructor
+@ConditionalOnProperty(prefix = "rag.initializer", name = "enabled", havingValue = "true")
 public class RagInitializer implements ApplicationRunner {
 
     private final MilvusService milvusService;

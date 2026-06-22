@@ -36,6 +36,7 @@ export const useChatStore = defineStore('chat', () => {
   const streamSources = ref<SourceReference[]>([])
   const streamWebResults = ref<SourceReference[]>([])
   const streamSandboxResults = ref<SandboxExecution[]>([])
+  const thinkingSteps = ref<Array<{step: string, message: string}>>([])
 
   const sortedSessions = computed(() =>
     [...sessions.value].sort((a, b) =>
@@ -96,8 +97,8 @@ export const useChatStore = defineStore('chat', () => {
 
   function sendMessage(
     content: string,
-    retrievalStrategy: 'dense' | 'sparse' | 'graph' | 'hybrid' = 'hybrid',
-    useMemory = true
+    retrievalStrategy: 'none' | 'dense' | 'sparse' | 'graph' | 'hybrid' = 'none',
+    useMemory = false
   ) {
     if (!currentSession.value || isStreaming.value) return
 
@@ -108,7 +109,7 @@ export const useChatStore = defineStore('chat', () => {
       content,
       createdAt: new Date().toISOString(),
     }
-    messages.value.push(userMessage)
+    messages.value = [...messages.value, userMessage]
 
     const req: ChatRequest = {
       sessionId: currentSession.value.id,
@@ -123,6 +124,7 @@ export const useChatStore = defineStore('chat', () => {
     streamSources.value = []
     streamWebResults.value = []
     streamSandboxResults.value = []
+    thinkingSteps.value = []
 
     const assistantMessage: ChatMessage = {
       id: (Date.now() + 1).toString(),
@@ -132,28 +134,34 @@ export const useChatStore = defineStore('chat', () => {
       sources: [],
       webResults: [],
       sandboxResults: [],
+      thinkingSteps: [],
       createdAt: new Date().toISOString(),
     }
-    messages.value.push(assistantMessage)
+    messages.value = [...messages.value, assistantMessage]
     const assistantIndex = messages.value.length - 1
+
+    // 更新消息并触发响应式 - 使用新数组引用来确保 Vue 检测到变化
+    const updateMessage = () => {
+      const newMessages = [...messages.value]
+      newMessages[assistantIndex] = {
+        ...newMessages[assistantIndex],
+        content: streamContent.value,
+        thinkingSteps: [...thinkingSteps.value],
+        sources: [...streamSources.value],
+        webResults: [...streamWebResults.value],
+        sandboxResults: [...streamSandboxResults.value],
+      }
+      messages.value = newMessages
+    }
 
     chatApi.streamChat(req, {
       onMessage(chunk: string) {
         streamContent.value += chunk
-        messages.value.splice(assistantIndex, 1, {
-          ...messages.value[assistantIndex],
-          content: streamContent.value,
-        })
+        updateMessage()
       },
       onDone() {
         isStreaming.value = false
-        messages.value.splice(assistantIndex, 1, {
-          ...messages.value[assistantIndex],
-          content: streamContent.value,
-          sources: [...streamSources.value],
-          webResults: [...streamWebResults.value],
-          sandboxResults: [...streamSandboxResults.value],
-        })
+        updateMessage()
         const session = sessions.value.find(s => s.id === currentSession.value?.id)
         if (session) {
           session.updatedAt = new Date().toISOString()
@@ -162,10 +170,12 @@ export const useChatStore = defineStore('chat', () => {
       },
       onError(error: Error) {
         isStreaming.value = false
-        messages.value.splice(assistantIndex, 1, {
-          ...messages.value[assistantIndex],
+        const newMessages = [...messages.value]
+        newMessages[assistantIndex] = {
+          ...newMessages[assistantIndex],
           content: streamContent.value + '\n\n[流式响应中断: ' + error.message + ']',
-        })
+        }
+        messages.value = newMessages
         console.error('Stream error:', error)
       },
       onSource(sources: SourceReference[]) {
@@ -177,6 +187,7 @@ export const useChatStore = defineStore('chat', () => {
           score: s.score || 0,
           chunkIndex: s.chunkIndex || 0,
         }))
+        updateMessage()
       },
       onWebSearch(results: SourceReference[]) {
         streamWebResults.value = results.map((s: any) => ({
@@ -188,6 +199,7 @@ export const useChatStore = defineStore('chat', () => {
           chunkIndex: s.chunkIndex || 0,
           source: s.source || '',
         }))
+        updateMessage()
       },
       onSandbox(result: SandboxExecution) {
         streamSandboxResults.value.push(result)
@@ -199,12 +211,17 @@ export const useChatStore = defineStore('chat', () => {
             : ''
         if (sandboxOutput) {
           streamContent.value += sandboxOutput
-          messages.value.splice(assistantIndex, 1, {
-            ...messages.value[assistantIndex],
-            content: streamContent.value,
-            sandboxResults: [...streamSandboxResults.value],
-          })
+          updateMessage()
         }
+      },
+      onThinking(step: string, message: string) {
+        if (step === 'done') {
+          // 生成完成，清除思考过程
+          thinkingSteps.value = []
+        } else {
+          thinkingSteps.value.push({ step, message })
+        }
+        updateMessage()
       },
     })
   }
@@ -219,6 +236,7 @@ export const useChatStore = defineStore('chat', () => {
     streamSources,
     streamWebResults,
     streamSandboxResults,
+    thinkingSteps,
     sortedSessions,
     loadSessions,
     createSession,

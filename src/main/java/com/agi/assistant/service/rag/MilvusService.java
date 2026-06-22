@@ -61,6 +61,10 @@ public class MilvusService {
         this.vectorDim = milvusVectorDim != null ? milvusVectorDim : 1024;
     }
 
+    public boolean isAvailable() {
+        return milvusClient != null;
+    }
+
     // ──────────────────────────────────────────────────────────────
     //  集合管理
     // ──────────────────────────────────────────────────────────────

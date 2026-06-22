@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.neo4j.driver.AuthTokens;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.GraphDatabase;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -15,6 +16,7 @@ import jakarta.annotation.PreDestroy;
 @Data
 @Configuration
 @ConfigurationProperties(prefix = "neo4j")
+@ConditionalOnProperty(prefix = "neo4j", name = "enabled", havingValue = "true")
 public class Neo4jConfig {
 
     private String uri;

@@ -13,6 +13,28 @@
         <span class="message-role">{{ message.role === 'user' ? '用户' : 'AI助手' }}</span>
         <span class="message-time">{{ formatTime(message.createdAt) }}</span>
       </div>
+      <!-- 思考过程展示 -->
+      <div v-if="message.thinkingSteps?.length" class="thinking-process">
+        <div class="thinking-header" @click="toggleThinking">
+          <el-icon><Loading /></el-icon>
+          <span>思考过程</span>
+          <el-icon class="expand-icon" :class="{ expanded: showThinking }"><ArrowDown /></el-icon>
+        </div>
+        <transition name="el-zoom-in-top">
+          <div v-show="showThinking" class="thinking-steps">
+            <div
+              v-for="(step, idx) in message.thinkingSteps"
+              :key="idx"
+              class="thinking-step"
+              :class="step.step"
+            >
+              <el-icon v-if="step.step.includes('done')"><CircleCheck /></el-icon>
+              <el-icon v-else class="rotating"><Loading /></el-icon>
+              <span>{{ step.message }}</span>
+            </div>
+          </div>
+        </transition>
+      </div>
       <div class="message-body" :class="{ 'streaming': isStreaming }" v-html="renderedContent" />
       <SourceReference v-if="message.sources?.length" :sources="message.sources" />
       <SourceReference v-if="message.webResults?.length" :sources="message.webResults" />
@@ -26,8 +48,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import { User, ChatDotRound } from '@element-plus/icons-vue'
+import { computed, ref } from 'vue'
+import { User, ChatDotRound, Loading, CircleCheck, ArrowDown } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
@@ -40,6 +62,12 @@ const props = defineProps<{
   message: ChatMessage
   isStreaming?: boolean
 }>()
+
+const showThinking = ref(true)
+
+function toggleThinking() {
+  showThinking.value = !showThinking.value
+}
 
 const md = new MarkdownIt({
   html: true,
@@ -172,6 +200,84 @@ function formatTime(date: string) {
 
 .message-body :deep(th) {
   background: #f5f7fa;
+}
+
+/* Thinking process styles */
+.thinking-process {
+  margin-bottom: 12px;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fafafa;
+}
+
+.thinking-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #606266;
+  font-weight: 500;
+  transition: background-color 0.2s;
+}
+
+.thinking-header:hover {
+  background: #f0f2f5;
+}
+
+.expand-icon {
+  margin-left: auto;
+  transition: transform 0.3s;
+}
+
+.expand-icon.expanded {
+  transform: rotate(180deg);
+}
+
+.thinking-steps {
+  padding: 0 14px 12px;
+}
+
+.thinking-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 12px;
+  color: #909399;
+  border-bottom: 1px dashed #ebeef5;
+}
+
+.thinking-step:last-child {
+  border-bottom: none;
+}
+
+.thinking-step .el-icon {
+  font-size: 14px;
+}
+
+.thinking-step.retrieval .el-icon,
+.thinking-step.websearch .el-icon,
+.thinking-step.memory .el-icon,
+.thinking-step.generation .el-icon {
+  color: #409eff;
+}
+
+.thinking-step.retrieval_done .el-icon,
+.thinking-step.websearch_done .el-icon,
+.thinking-step.memory_done .el-icon {
+  color: #67c23a;
+}
+
+.rotating {
+  animation: rotate 1s linear infinite;
+}
+
+@keyframes rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* Streaming cursor effect */

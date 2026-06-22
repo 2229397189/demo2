@@ -26,12 +26,22 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8080',
         changeOrigin: true,
-        configure: (proxy) => {
-          proxy.on('proxyRes', (proxyRes) => {
-            // Disable buffering for SSE streams
+        // Disable buffering for SSE streams
+        configure: (proxy, options) => {
+          proxy.on('proxyReq', (proxyReq, req, res) => {
+            // Disable Nagle's algorithm for streaming
+            proxyReq.setNoDelay(true)
+          })
+          proxy.on('proxyRes', (proxyRes, req, res) => {
+            // Disable buffering for SSE
             proxyRes.headers['x-accel-buffering'] = 'no'
+            proxyRes.headers['Cache-Control'] = 'no-cache'
+            proxyRes.headers['Connection'] = 'keep-alive'
           })
         },
+        // Important: disable response buffering
+        ws: true,
+        timeout: 300000,
       },
     },
   },

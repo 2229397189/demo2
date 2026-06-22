@@ -1,6 +1,7 @@
 package com.agi.assistant.model.enums;
 
 public enum RetrievalStrategy {
+    NONE,
     DENSE,
     SPARSE,
     GRAPH,

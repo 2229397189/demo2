@@ -1,7 +1,17 @@
 server:
   port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+      force-response: true
+      force-request: true
 
 spring:
+  config:
+    import: optional:file:.env[.properties]
+
   application:
     name: agi-assistant
 
@@ -12,8 +22,8 @@ spring:
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:123456}
     hikari:
-      minimum-idle: 5
-      maximum-pool-size: 20
+      minimum-idle: ${DB_MIN_IDLE:1}
+      maximum-pool-size: ${DB_MAX_POOL_SIZE:5}
       idle-timeout: 30000
       max-lifetime: 1800000
       connection-timeout: 5000
@@ -94,6 +104,7 @@ mybatis-plus:
 
 # Milvus
 milvus:
+  enabled: ${MILVUS_ENABLED:false}
   host: ${MILVUS_HOST:localhost}
   port: ${MILVUS_PORT:19530}
   database: ${MILVUS_DATABASE:default}
@@ -109,18 +120,19 @@ spring.elasticsearch:
 
 # Neo4j
 neo4j:
-  uri: bolt://localhost:7687
+  enabled: ${NEO4J_ENABLED:false}
+  uri: ${NEO4J_URI:bolt://localhost:7687}
   authentication:
     username: ${NEO4J_USERNAME:neo4j}
     password: ${NEO4J_PASSWORD:neo4j123456}
-  max-connection-pool-size: 100
-  connection-acquisition-timeout: 60
+  max-connection-pool-size: ${NEO4J_MAX_CONNECTION_POOL_SIZE:5}
+  connection-acquisition-timeout: ${NEO4J_CONNECTION_ACQUISITION_TIMEOUT:5}
 
-# OpenAI Compatible API (Xiaomi MiMo)
+# OpenAI Compatible API
 openai:
-  base-url: ${OPENAI_BASE_URL:https://token-plan-cn.xiaomimimo.com/v1}
-  api-key: ${OPENAI_API_KEY:tp-crgjc0kfps3xfd0l15tvxha7lln0swbspfu6bc2zt5bac0u0}
-  model: ${OPENAI_MODEL:mimo-v2.5-pro}
+  base-url: ${OPENAI_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+  api-key: ${OPENAI_API_KEY:}
+  model: ${OPENAI_MODEL:qwen3.7-max-2026-05-17}
   max-tokens: ${OPENAI_MAX_TOKENS:4096}
   temperature: ${OPENAI_TEMPERATURE:0.7}
   timeout: ${OPENAI_TIMEOUT:120}
@@ -129,7 +141,7 @@ openai:
 # Embedding API (Alibaba DashScope)
 embedding:
   base-url: ${EMBEDDING_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
-  api-key: ${EMBEDDING_API_KEY:sk-6401f0f4f27b4016b2e92d99c9447bf3}
+  api-key: ${EMBEDDING_API_KEY:}
   model: ${EMBEDDING_MODEL:text-embedding-v3}
   dimensions: ${EMBEDDING_DIMENSIONS:1024}
 

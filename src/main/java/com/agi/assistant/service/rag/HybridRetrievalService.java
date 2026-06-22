@@ -98,6 +98,9 @@ public class HybridRetrievalService {
         List<SearchResult> results;
 
         switch (strat) {
+            case NONE:
+                results = Collections.emptyList();
+                break;
             case DENSE:
                 results = executeDense(query, topK);
                 break;
@@ -133,6 +136,11 @@ public class HybridRetrievalService {
      */
     public List<SearchResult> executeDense(String query, int topK) {
         try {
+            if (!milvusService.isAvailable()) {
+                log.debug("Milvus is disabled or unavailable, skipping dense retrieval");
+                return Collections.emptyList();
+            }
+
             // 1. 将查询文本转为向量
             List<Float> queryEmbedding = embeddingService.embed(query);
             if (queryEmbedding.isEmpty()) {

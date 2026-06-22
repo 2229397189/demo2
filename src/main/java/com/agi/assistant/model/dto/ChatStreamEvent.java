@@ -4,6 +4,8 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.Map;
+
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
@@ -21,6 +23,10 @@ public class ChatStreamEvent {
 
     public static ChatStreamEvent thinking(String content) {
         return new ChatStreamEvent("thinking", content);
+    }
+
+    public static ChatStreamEvent thinking(String step, String message) {
+        return new ChatStreamEvent("thinking", Map.of("step", step, "message", message));
     }
 
     public static ChatStreamEvent content(String text) {

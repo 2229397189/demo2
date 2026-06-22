@@ -321,6 +321,10 @@ public class GraphRetrievalService {
         if (query == null || query.isBlank()) {
             return Collections.emptyList();
         }
+        if (neo4jDriver == null) {
+            log.debug("Neo4j is disabled or unavailable, skipping graph retrieval");
+            return Collections.emptyList();
+        }
 
         // 1. 从查询中抽取实体
         Map<String, Object> extracted = extractEntities(query);
