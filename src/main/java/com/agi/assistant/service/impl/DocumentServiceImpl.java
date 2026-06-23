@@ -14,6 +14,8 @@ import com.agi.assistant.service.rag.ChunkService;
 import com.agi.assistant.service.rag.DocumentParser;
 import com.agi.assistant.service.rag.EmbeddingService;
 import com.agi.assistant.service.rag.MilvusService;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.tika.Tika;
 import org.apache.tika.exception.TikaException;
 import org.springframework.context.annotation.Lazy;
@@ -336,12 +338,21 @@ public class DocumentServiceImpl implements DocumentService {
     }
 
     /**
-     * 使用 Apache Tika 解析文档，支持 PDF、Word、HTML 等多种格式。
+     * 使用 Apache Tika 解析文档，支持 Word、HTML 等多种格式。
+     * PDF 文件使用 PDFBox 解析以获得更好的中文支持。
      *
      * @param filePath 文件路径
      * @return 提取的文本内容
      */
     private String parseWithTika(Path filePath) {
+        String fileName = filePath.getFileName().toString().toLowerCase();
+
+        // PDF 文件使用 PDFBox 解析，解决中文乱码问题
+        if (fileName.endsWith(".pdf")) {
+            return parsePdfWithPdfBox(filePath);
+        }
+
+        // 其他格式使用 Tika
         try (InputStream inputStream = Files.newInputStream(filePath)) {
             String content = tika.parseToString(inputStream);
             log.info("Tika parsed file [{}], extracted {} characters", filePath.getFileName(), content.length());
@@ -350,5 +361,61 @@ public class DocumentServiceImpl implements DocumentService {
             log.error("Tika failed to parse file [{}]: {}", filePath, e.getMessage(), e);
             throw new RuntimeException("文档解析失败: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 使用 Apache PDFBox 解析 PDF 文件，提供更好的中文支持。
+     *
+     * @param filePath PDF 文件路径
+     * @return 提取的文本内容
+     */
+    private String parsePdfWithPdfBox(Path filePath) {
+        try (PDDocument document = PDDocument.load(filePath.toFile())) {
+            PDFTextStripper stripper = new PDFTextStripper();
+            stripper.setSortByPosition(true);  // 按位置排序，保持阅读顺序
+            String content = stripper.getText(document);
+
+            // 清理空字符和多余的空白
+            content = cleanPdfContent(content);
+
+            log.info("PDFBox parsed file [{}], extracted {} characters, pages={}",
+                    filePath.getFileName(), content.length(), document.getNumberOfPages());
+            return content;
+        } catch (IOException e) {
+            log.error("PDFBox failed to parse file [{}]: {}", filePath, e.getMessage(), e);
+            throw new RuntimeException("PDF 解析失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 清理 PDF 解析后的内容，移除空字符和多余空白。
+     *
+     * @param content 原始解析内容
+     * @return 清理后的内容
+     */
+    private String cleanPdfContent(String content) {
+        if (content == null) {
+            return "";
+        }
+        // 移除空字符
+        content = content.replace("\0", "");
+        // 移除零宽空格和其他不可见 Unicode 字符
+        content = content.replaceAll("[\\u200B\\u200C\\u200D\\uFEFF]", "");
+        // 规范化空白：将多个连续空格/制表符合并为单个空格
+        content = content.replaceAll("[ \\t]+", " ");
+        // 规范化换行：移除多余的空行
+        content = content.replaceAll("\\n{3,}", "\n\n");
+        // 清理域名中的异常空格（PDF 解析常见问题）
+        content = content.replaceAll("\\.\\s+com", ".com");
+        content = content.replaceAll("\\.\\s+cn", ".cn");
+        content = content.replaceAll("\\.\\s+org", ".org");
+        content = content.replaceAll("\\.\\s+net", ".net");
+        // 清理数字和日期中的异常空格（如 "2. 09" -> "2.09", "2023. 09" -> "2023.09"）
+        content = content.replaceAll("(\\d)\\s+\\.(\\s+)(\\d)", "$1.$3");
+        content = content.replaceAll("(\\d{4})\\s+\\.(\\s+)(\\d{2})", "$1.$3");
+        // 清理常见模式的异常空格
+        content = content.replaceAll("(\\d+)\\s+%", "$1%");
+        content = content.replaceAll("(\\d+)\\s+s\\b", "$1s");
+        return content.trim();
     }
 }
