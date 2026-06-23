@@ -24,6 +24,13 @@ import java.util.Map;
 public class EvaluationController {
 
     private final EvaluationService evaluationService;
+    private final com.agi.assistant.service.evaluation.BenchmarkDataset benchmarkDataset;
+
+    @GetMapping("/datasets")
+    @Operation(summary = "可用数据集列表", description = "列出所有可用的评测数据集及其查询数量")
+    public Result<List<Map<String, Object>>> listDatasets() {
+        return Result.ok(benchmarkDataset.listDatasets());
+    }
 
     @PostMapping("/tasks")
     @Operation(summary = "创建评测任务", description = "创建一个新的RAG评测任务")

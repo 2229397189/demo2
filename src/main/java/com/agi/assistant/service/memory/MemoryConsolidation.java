@@ -37,11 +37,17 @@ import java.util.stream.Collectors;
 public class MemoryConsolidation {
 
     private static final String FACT_EXTRACTION_PROMPT =
-            "请从以下对话中提取所有值得长期记忆的事实、用户偏好和知识点。\n" +
+            "请从以下对话中提取用户明确表达的偏好、习惯、知识和事实。\n\n" +
+            "【重要规则】\n" +
+            "1. 只提取用户（[user] 标签）明确说出的信息\n" +
+            "2. 不要提取 AI（[assistant] 标签）回复中的推断、建议或引用的内容\n" +
+            "3. 不要提取简历、文档中的信息，除非用户明确说「我的简历写了...」\n" +
+            "4. 区分「用户说的」和「AI说的」，只记录用户主动表达的内容\n\n" +
             "以 JSON 数组格式输出，每个元素包含：\n" +
-            "- \"content\": 事实内容\n" +
+            "- \"content\": 事实内容（必须是用户原话或明确表达的意思）\n" +
             "- \"type\": 类型（preference / knowledge / fact / habit）\n" +
             "- \"importance\": 重要性（0.0-1.0）\n" +
+            "- \"source\": 来源（user/ai，标记信息来源）\n\n" +
             "对话内容：\n";
 
     private static final double SIMILARITY_DEDUP_THRESHOLD = 0.90;
@@ -164,14 +170,14 @@ public class MemoryConsolidation {
             String prompt = FACT_EXTRACTION_PROMPT + conversation;
 
             Map<String, Object> requestBody = Map.of(
-                    "model", "default",
+                    "model", "qwen-turbo",
                     "messages", List.of(Map.of("role", "user", "content", prompt)),
                     "temperature", 0.2,
                     "max_tokens", 3000
             );
 
             String responseStr = openAiWebClient.post()
-                    .uri("/v1/chat/completions")
+                    .uri("/chat/completions")
                     .bodyValue(requestBody)
                     .retrieve()
                     .bodyToMono(String.class)
@@ -202,8 +208,18 @@ public class MemoryConsolidation {
 
             List<Map<String, Object>> facts = objectMapper.readValue(jsonStr,
                     new TypeReference<List<Map<String, Object>>>() {});
-            log.debug("Extracted {} facts from conversation", facts.size());
-            return facts;
+
+            // 过滤掉 AI 来源的事实，只保留用户明确表达的内容
+            List<Map<String, Object>> userFacts = facts.stream()
+                    .filter(fact -> {
+                        String source = (String) fact.getOrDefault("source", "user");
+                        return "user".equalsIgnoreCase(source);
+                    })
+                    .collect(Collectors.toList());
+
+            log.debug("Extracted {} facts from conversation, {} from user",
+                    facts.size(), userFacts.size());
+            return userFacts;
 
         } catch (Exception e) {
             log.error("Fact extraction failed: {}", e.getMessage(), e);

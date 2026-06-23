@@ -13,6 +13,8 @@ import com.agi.assistant.model.entity.SearchResult;
 import com.agi.assistant.service.ChatService;
 import com.agi.assistant.service.SandboxService;
 import com.agi.assistant.service.memory.ContextAssembly;
+import com.agi.assistant.service.memory.MemoryConsolidation;
+import com.agi.assistant.service.memory.ShortTermMemory;
 import com.agi.assistant.service.rag.HybridRetrievalService;
 import com.agi.assistant.service.rag.WebSearchService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -37,6 +39,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -60,6 +63,8 @@ public class ChatServiceImpl implements ChatService {
     private final ChatMessageMapper chatMessageMapper;
     private final HybridRetrievalService hybridRetrievalService;
     private final ContextAssembly contextAssembly;
+    private final ShortTermMemory shortTermMemory;
+    private final MemoryConsolidation memoryConsolidation;
     private final OpenAIConfig openAIConfig;
     private final ObjectMapper objectMapper;
     private final WebClient streamingWebClient;
@@ -70,6 +75,8 @@ public class ChatServiceImpl implements ChatService {
                            ChatMessageMapper chatMessageMapper,
                            HybridRetrievalService hybridRetrievalService,
                            ContextAssembly contextAssembly,
+                           ShortTermMemory shortTermMemory,
+                           MemoryConsolidation memoryConsolidation,
                            OpenAIConfig openAIConfig,
                            ObjectMapper objectMapper,
                            @Qualifier("streamingWebClient") WebClient streamingWebClient,
@@ -79,6 +86,8 @@ public class ChatServiceImpl implements ChatService {
         this.chatMessageMapper = chatMessageMapper;
         this.hybridRetrievalService = hybridRetrievalService;
         this.contextAssembly = contextAssembly;
+        this.shortTermMemory = shortTermMemory;
+        this.memoryConsolidation = memoryConsolidation;
         this.openAIConfig = openAIConfig;
         this.objectMapper = objectMapper;
         this.streamingWebClient = streamingWebClient;
@@ -108,6 +117,9 @@ public class ChatServiceImpl implements ChatService {
             userMessage.setContent(request.getMessage());
             userMessage.setCreatedAt(LocalDateTime.now());
             chatMessageMapper.insert(userMessage);
+
+            // Save to short-term memory
+            shortTermMemory.addMessage(userId.toString(), userMessage);
 
             // 3. RAG retrieval
             List<SearchResult> searchResults = new ArrayList<>();
@@ -257,9 +269,22 @@ public class ChatServiceImpl implements ChatService {
                                     assistantMessage.setContent(assistantContent);
                                     assistantMessage.setCreatedAt(LocalDateTime.now());
                                     chatMessageMapper.insert(assistantMessage);
+
+                                    // Save to short-term memory
+                                    shortTermMemory.addMessage(userId.toString(), assistantMessage);
+
+                                    // 9. Consolidate memory (async)
+                                    CompletableFuture.runAsync(() -> {
+                                        try {
+                                            memoryConsolidation.consolidate(userId);
+                                            log.info("Memory consolidated for user {}", userId);
+                                        } catch (Exception e) {
+                                            log.warn("Memory consolidation failed: {}", e.getMessage());
+                                        }
+                                    });
                                 }
 
-                                // 9. Send completion thinking event
+                                // 10. Send completion thinking event
                                 sendThinkingEvent(emitter, "done", "回答完成");
 
                                 emitter.complete();

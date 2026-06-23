@@ -17,6 +17,7 @@ declare module 'vue' {
     ElCollapseTransition: typeof import('element-plus/es')['ElCollapseTransition']
     ElContainer: typeof import('element-plus/es')['ElContainer']
     ElDialog: typeof import('element-plus/es')['ElDialog']
+    ElDrawer: typeof import('element-plus/es')['ElDrawer']
     ElDropdown: typeof import('element-plus/es')['ElDropdown']
     ElDropdownItem: typeof import('element-plus/es')['ElDropdownItem']
     ElDropdownMenu: typeof import('element-plus/es')['ElDropdownMenu']
@@ -37,6 +38,7 @@ declare module 'vue' {
     ElTabPane: typeof import('element-plus/es')['ElTabPane']
     ElTabs: typeof import('element-plus/es')['ElTabs']
     ElTag: typeof import('element-plus/es')['ElTag']
+    ElTooltip: typeof import('element-plus/es')['ElTooltip']
     ElUpload: typeof import('element-plus/es')['ElUpload']
     MemoryGraph: typeof import('./src/components/memory/MemoryGraph.vue')['default']
     MessageBubble: typeof import('./src/components/chat/MessageBubble.vue')['default']
@@ -45,7 +47,9 @@ declare module 'vue' {
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     SandboxResult: typeof import('./src/components/chat/SandboxResult.vue')['default']
+    SkeletonLoader: typeof import('./src/components/common/SkeletonLoader.vue')['default']
     SourceReference: typeof import('./src/components/chat/SourceReference.vue')['default']
+    ThemeToggle: typeof import('./src/components/common/ThemeToggle.vue')['default']
     UserProfile: typeof import('./src/components/memory/UserProfile.vue')['default']
   }
   export interface ComponentCustomProperties {

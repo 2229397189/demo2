@@ -21,3 +21,7 @@ export function getResults(taskId: string): Promise<Result<EvaluationResult[]>> 
 export function compare(taskA: string, taskB: string): Promise<Result<Record<string, unknown>>> {
   return request.get('/evaluation/compare', { params: { taskA, taskB } })
 }
+
+export function listDatasets(): Promise<Result<Array<{ datasetId: string; queryCount: number }>>> {
+  return request.get('/evaluation/datasets')
+}

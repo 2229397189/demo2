@@ -5,7 +5,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.neo4j.driver.AuthTokens;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.GraphDatabase;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -18,32 +19,32 @@ import java.util.concurrent.TimeUnit;
 @Data
 @Configuration
 @ConfigurationProperties(prefix = "neo4j")
-@ConditionalOnProperty(prefix = "neo4j", name = "enabled", havingValue = "true")
+@ConditionalOnExpression("'${neo4j.enabled:false}' == 'true'")
 public class Neo4jConfig {
 
+    @Value("${neo4j.uri:bolt://localhost:7687}")
     private String uri;
-    private Authentication authentication = new Authentication();
+
+    @Value("${neo4j.authentication.username:neo4j}")
+    private String username;
+
+    @Value("${neo4j.authentication.password:neo4j123456}")
+    private String password;
+
     private int maxConnectionPoolSize = 5;
     private long connectionAcquisitionTimeout = 5;
     private long connectionTimeout = 5;
     private long maxTransactionRetryTime = 5;
 
-    @Data
-    public static class Authentication {
-        private String username;
-        private String password;
-    }
-
     private Driver driver;
 
     @Bean
     public Driver neo4jDriver() {
+        log.info("Initializing Neo4j driver with URI: {}, username: {}", uri, username);
         try {
             this.driver = GraphDatabase.driver(
-                    uri != null ? uri : "bolt://localhost:7687",
-                    AuthTokens.basic(
-                            authentication.getUsername() != null ? authentication.getUsername() : "neo4j",
-                            authentication.getPassword() != null ? authentication.getPassword() : "neo4j123456"),
+                    uri,
+                    AuthTokens.basic(username, password),
                     org.neo4j.driver.Config.builder()
                             .withMaxConnectionPoolSize(maxConnectionPoolSize > 0 ? maxConnectionPoolSize : 5)
                             .withConnectionAcquisitionTimeout(

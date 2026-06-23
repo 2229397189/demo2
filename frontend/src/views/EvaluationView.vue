@@ -121,8 +121,18 @@
         <el-form-item label="任务名称">
           <el-input v-model="newTask.name" placeholder="输入任务名称" />
         </el-form-item>
-        <el-form-item label="数据集ID">
-          <el-input v-model="newTask.datasetId" placeholder="输入数据集ID" />
+        <el-form-item label="数据集">
+          <el-select v-model="newTask.datasetId" placeholder="选择评测数据集" style="width: 100%">
+            <el-option
+              v-for="ds in datasets"
+              :key="ds.datasetId"
+              :label="`${ds.datasetId} (${ds.queryCount} 道题)`"
+              :value="ds.datasetId"
+            />
+          </el-select>
+          <div v-if="datasets.length === 0" style="color: #909399; font-size: 12px; margin-top: 4px;">
+            暂无可用数据集，请联系管理员添加
+          </div>
         </el-form-item>
         <el-form-item label="检索策略">
           <el-select v-model="newTask.retrievalStrategy" placeholder="选择策略">
@@ -152,6 +162,7 @@ import {
   Close,
 } from '@element-plus/icons-vue'
 import { useEvaluationStore } from '@/stores/evaluation'
+import * as evaluationApi from '@/api/evaluation'
 import type { EvaluationTask } from '@/types'
 import dayjs from 'dayjs'
 
@@ -160,6 +171,7 @@ const showCreateDialog = ref(false)
 const creating = ref(false)
 const comparing = ref(false)
 const selectedForCompare = ref<string[]>([])
+const datasets = ref<Array<{ datasetId: string; queryCount: number }>>([])
 
 const newTask = ref({
   name: '',
@@ -169,6 +181,15 @@ const newTask = ref({
 
 async function loadTasks() {
   await evaluationStore.loadTasks()
+}
+
+async function loadDatasets() {
+  try {
+    const res = await evaluationApi.listDatasets()
+    datasets.value = res.data || []
+  } catch (error) {
+    console.error('Failed to load datasets:', error)
+  }
 }
 
 async function handleCreateTask() {
@@ -275,6 +296,7 @@ function getStatusLabel(status: string | number) {
 
 onMounted(() => {
   loadTasks()
+  loadDatasets()
 })
 </script>
 

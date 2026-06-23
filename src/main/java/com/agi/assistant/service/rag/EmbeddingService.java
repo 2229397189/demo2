@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -35,6 +36,12 @@ public class EmbeddingService {
     /** 单条文本最大字符数 */
     private static final int MAX_TEXT_LENGTH = 8192;
 
+    /** 连接超时（秒） */
+    private static final int CONNECT_TIMEOUT_SECONDS = 10;
+
+    /** 读取超时（秒） */
+    private static final int READ_TIMEOUT_SECONDS = 30;
+
     private final EmbeddingConfig config;
     private final WebClient webClient;
     private final ObjectMapper objectMapper;
@@ -42,10 +49,17 @@ public class EmbeddingService {
     public EmbeddingService(EmbeddingConfig config) {
         this.config = config;
         this.objectMapper = new ObjectMapper();
+
+        // 创建带超时配置的 HttpClient
+        reactor.netty.http.client.HttpClient httpClient = reactor.netty.http.client.HttpClient.create()
+                .option(io.netty.channel.ChannelOption.CONNECT_TIMEOUT_MILLIS, CONNECT_TIMEOUT_SECONDS * 1000)
+                .responseTimeout(Duration.ofSeconds(READ_TIMEOUT_SECONDS));
+
         this.webClient = WebClient.builder()
                 .baseUrl(config.getBaseUrl())
                 .defaultHeader("Authorization", "Bearer " + config.getApiKey())
                 .defaultHeader("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                .clientConnector(new org.springframework.http.client.reactive.ReactorClientHttpConnector(httpClient))
                 .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
                 .build();
     }

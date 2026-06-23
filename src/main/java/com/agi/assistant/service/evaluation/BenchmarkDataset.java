@@ -1,6 +1,8 @@
 package com.agi.assistant.service.evaluation;
 
+import com.agi.assistant.mapper.GoldenQueryMapper;
 import com.agi.assistant.model.entity.GoldenQuery;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -17,14 +19,13 @@ import java.util.stream.Collectors;
  * <p>
  * 管理评测基准数据集和黄金查询（Golden Query），
  * 提供数据集加载、查询检索、新增查询等功能。
- * <p>
- * 内存缓存 + 持久化占位实现，正式环境应接入 MyBatis Mapper。
  */
 @Slf4j
 @Service
 public class BenchmarkDataset {
 
     private final ObjectMapper objectMapper;
+    private final GoldenQueryMapper goldenQueryMapper;
 
     /** 数据集缓存：datasetId → GoldenQuery 列表 */
     private final Map<String, List<GoldenQuery>> datasetCache = new ConcurrentHashMap<>();
@@ -32,9 +33,30 @@ public class BenchmarkDataset {
     /** 自增 ID 生成器 */
     private final AtomicLong idGenerator = new AtomicLong(1);
 
-    public BenchmarkDataset(ObjectMapper objectMapper) {
+    public BenchmarkDataset(ObjectMapper objectMapper, GoldenQueryMapper goldenQueryMapper) {
         this.objectMapper = objectMapper;
+        this.goldenQueryMapper = goldenQueryMapper;
         initSampleDataset();
+    }
+
+    /**
+     * 列出所有可用数据集及其查询数量。
+     *
+     * @return 数据集信息列表，每项包含 datasetId 和 queryCount
+     */
+    public List<Map<String, Object>> listDatasets() {
+        List<GoldenQuery> allQueries = goldenQueryMapper.selectList(null);
+        Map<String, Long> countByDataset = allQueries.stream()
+                .collect(Collectors.groupingBy(GoldenQuery::getDatasetId, Collectors.counting()));
+
+        return countByDataset.entrySet().stream()
+                .map(e -> {
+                    Map<String, Object> info = new HashMap<>();
+                    info.put("datasetId", e.getKey());
+                    info.put("queryCount", e.getValue());
+                    return info;
+                })
+                .collect(Collectors.toList());
     }
 
     /**
@@ -49,9 +71,24 @@ public class BenchmarkDataset {
             return List.of();
         }
 
-        List<GoldenQuery> queries = datasetCache.getOrDefault(datasetId, List.of());
-        log.info("Loaded dataset [{}]: {} queries", datasetId, queries.size());
-        return Collections.unmodifiableList(queries);
+        List<GoldenQuery> queries = datasetCache.get(datasetId);
+        if (queries != null) {
+            log.info("Loaded dataset [{}] from cache: {} queries", datasetId, queries.size());
+            return Collections.unmodifiableList(queries);
+        }
+
+        // Cache miss — fall back to database
+        List<GoldenQuery> dbQueries = goldenQueryMapper.selectList(
+                new LambdaQueryWrapper<GoldenQuery>()
+                        .eq(GoldenQuery::getDatasetId, datasetId));
+        if (dbQueries != null && !dbQueries.isEmpty()) {
+            datasetCache.put(datasetId, dbQueries);
+            log.info("Loaded dataset [{}] from database: {} queries", datasetId, dbQueries.size());
+            return Collections.unmodifiableList(dbQueries);
+        }
+
+        log.warn("Dataset [{}] not found in cache or database", datasetId);
+        return List.of();
     }
 
     /**
@@ -87,6 +124,15 @@ public class BenchmarkDataset {
         goldenQuery.setCategory(category);
         goldenQuery.setCreatedAt(LocalDateTime.now());
 
+        // 保存到数据库
+        try {
+            goldenQueryMapper.insert(goldenQuery);
+            log.info("Saved golden query to database: id={}", goldenQuery.getId());
+        } catch (Exception e) {
+            log.warn("Failed to save golden query to database: {}", e.getMessage());
+        }
+
+        // 同时保存到缓存
         datasetCache.computeIfAbsent(datasetId, k -> new ArrayList<>()).add(goldenQuery);
 
         log.info("Added golden query to dataset [{}]: query='{}', id={}",
@@ -202,9 +248,28 @@ public class BenchmarkDataset {
 
     /**
      * 初始化示例数据集。
+     * 如果数据库中已有数据，则从数据库加载；否则初始化示例数据。
      */
     private void initSampleDataset() {
         String sampleDatasetId = "sample-dataset";
+
+        // 检查数据库中是否已有数据
+        Long count = goldenQueryMapper.selectCount(
+                new LambdaQueryWrapper<GoldenQuery>()
+                        .eq(GoldenQuery::getDatasetId, sampleDatasetId));
+
+        if (count != null && count > 0) {
+            // 从数据库加载
+            List<GoldenQuery> queries = goldenQueryMapper.selectList(
+                    new LambdaQueryWrapper<GoldenQuery>()
+                            .eq(GoldenQuery::getDatasetId, sampleDatasetId));
+            datasetCache.put(sampleDatasetId, queries);
+            log.info("Loaded {} golden queries from database for dataset [{}]",
+                    queries.size(), sampleDatasetId);
+            return;
+        }
+
+        // 初始化示例数据
         addGoldenQuery(sampleDatasetId,
                 "什么是 RAG（检索增强生成）？",
                 "RAG 是一种结合检索和生成的 AI 技术，通过从知识库中检索相关信息来增强大语言模型的回答质量。",

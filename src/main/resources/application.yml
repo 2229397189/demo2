@@ -42,6 +42,7 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:redis123456}
       database: 0
       timeout: 5000
       lettuce:
@@ -118,15 +119,15 @@ spring.elasticsearch:
   connection-timeout: 5000
   socket-timeout: 60000
 
-# Neo4j
+# Neo4j - DISABLED (set to true and configure credentials to enable)
 neo4j:
-  enabled: ${NEO4J_ENABLED:false}
-  uri: ${NEO4J_URI:bolt://localhost:7687}
+  enabled: false
+  uri: bolt://localhost:7687
   authentication:
-    username: ${NEO4J_USERNAME:neo4j}
-    password: ${NEO4J_PASSWORD:neo4j123456}
-  max-connection-pool-size: ${NEO4J_MAX_CONNECTION_POOL_SIZE:5}
-  connection-acquisition-timeout: ${NEO4J_CONNECTION_ACQUISITION_TIMEOUT:5}
+    username: neo4j
+    password: neo4j123456
+  max-connection-pool-size: 5
+  connection-acquisition-timeout: 5
 
 # OpenAI Compatible API
 openai:

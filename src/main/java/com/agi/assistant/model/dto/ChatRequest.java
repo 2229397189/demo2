@@ -9,7 +9,7 @@ public class ChatRequest {
 
     private Long sessionId;
 
-    private boolean useMemory = false;
+    private boolean useMemory = true;
 
     private String retrievalStrategy = "HYBRID";
 
