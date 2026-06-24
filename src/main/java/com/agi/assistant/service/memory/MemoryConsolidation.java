@@ -95,19 +95,19 @@ public class MemoryConsolidation {
      * 4. Save to long-term memory and graph
      * 5. Decay importance of older memories
      *
-     * @param userId the user identifier
+     * @param userId    the user identifier
+     * @param sessionId the session identifier (used to retrieve short-term memories)
      */
-    public void consolidate(Long userId) {
+    public void consolidate(Long userId, String sessionId) {
         if (userId == null) {
             return;
         }
 
-        log.info("Starting memory consolidation for user [{}]", userId);
+        log.info("Starting memory consolidation for user [{}], session [{}]", userId, sessionId);
 
         try {
-            // 1. Get recent short-term messages
-            List<ChatMessage> recentMessages = shortTermMemory.getRecentMessages(
-                    userId.toString(), 20);
+            // 1. Get recent short-term messages using sessionId
+            List<ChatMessage> recentMessages = shortTermMemory.getRecentMessages(sessionId, 20);
             if (recentMessages.isEmpty()) {
                 log.debug("No recent messages for user [{}], skipping consolidation", userId);
                 return;

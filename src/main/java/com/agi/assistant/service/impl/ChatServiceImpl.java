@@ -274,7 +274,7 @@ public class ChatServiceImpl implements ChatService {
 
                         // 异步记忆整合
                         CompletableFuture.runAsync(() -> {
-                            try { memoryConsolidation.consolidate(userId); } catch (Exception ignored) {}
+                            try { memoryConsolidation.consolidate(userId, sessionId.toString()); } catch (Exception ignored) {}
                         });
 
                         sendThinkingEvent(emitter, "done", "回答完成");
@@ -378,8 +378,8 @@ public class ChatServiceImpl implements ChatService {
                                     // 9. Consolidate memory (async)
                                     CompletableFuture.runAsync(() -> {
                                         try {
-                                            memoryConsolidation.consolidate(userId);
-                                            log.info("Memory consolidated for user {}", userId);
+                                            memoryConsolidation.consolidate(userId, sessionId.toString());
+                                            log.info("Memory consolidated for user {}, session {}", userId, sessionId);
                                         } catch (Exception e) {
                                             log.warn("Memory consolidation failed: {}", e.getMessage());
                                         }

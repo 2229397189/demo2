@@ -191,7 +191,7 @@ public class GenerationEvaluator {
             );
 
             String response = openAiWebClient.post()
-                    .uri("/v1/chat/completions")
+                    .uri("/chat/completions")
                     .bodyValue(requestBody)
                     .retrieve()
                     .bodyToMono(String.class)
