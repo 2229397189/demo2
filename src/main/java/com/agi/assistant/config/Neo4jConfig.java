@@ -6,7 +6,7 @@ import org.neo4j.driver.AuthTokens;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.GraphDatabase;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit;
 @Data
 @Configuration
 @ConfigurationProperties(prefix = "neo4j")
-@ConditionalOnExpression("'${neo4j.enabled:false}' == 'true'")
+@ConditionalOnProperty(name = "neo4j.enabled", havingValue = "true", matchIfMissing = false)
 public class Neo4jConfig {
 
     @Value("${neo4j.uri:bolt://localhost:7687}")

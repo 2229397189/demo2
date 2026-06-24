@@ -249,9 +249,19 @@ function formatTime(date: string) {
 function formatMetrics(metricsJson: string): string {
   try {
     const metrics = JSON.parse(metricsJson)
+    const labelMap: Record<string, string> = {
+      recallAtK: 'Recall',
+      precisionAtK: 'Precision',
+      mrr: 'MRR',
+      ndcgAtK: 'NDCG',
+      hitRate: 'HitRate',
+    }
     return Object.entries(metrics)
-      .filter(([, v]) => typeof v === 'number')
-      .map(([k, v]) => `${k}: ${((v as number) * 100).toFixed(1)}%`)
+      .filter(([k, v]) => typeof v === 'number' && k !== 'k')
+      .map(([k, v]) => {
+        const label = labelMap[k] || k
+        return `${label}: ${((v as number) * 100).toFixed(1)}%`
+      })
       .join(', ')
   } catch {
     return metricsJson

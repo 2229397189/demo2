@@ -1,6 +1,8 @@
 package com.agi.assistant.service.evaluation;
 
+import com.agi.assistant.mapper.DocumentMapper;
 import com.agi.assistant.mapper.GoldenQueryMapper;
+import com.agi.assistant.model.entity.Document;
 import com.agi.assistant.model.entity.GoldenQuery;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -26,6 +28,7 @@ public class BenchmarkDataset {
 
     private final ObjectMapper objectMapper;
     private final GoldenQueryMapper goldenQueryMapper;
+    private final DocumentMapper documentMapper;
 
     /** 数据集缓存：datasetId → GoldenQuery 列表 */
     private final Map<String, List<GoldenQuery>> datasetCache = new ConcurrentHashMap<>();
@@ -33,9 +36,11 @@ public class BenchmarkDataset {
     /** 自增 ID 生成器 */
     private final AtomicLong idGenerator = new AtomicLong(1);
 
-    public BenchmarkDataset(ObjectMapper objectMapper, GoldenQueryMapper goldenQueryMapper) {
+    public BenchmarkDataset(ObjectMapper objectMapper, GoldenQueryMapper goldenQueryMapper,
+                            DocumentMapper documentMapper) {
         this.objectMapper = objectMapper;
         this.goldenQueryMapper = goldenQueryMapper;
+        this.documentMapper = documentMapper;
         initSampleDataset();
     }
 
@@ -248,7 +253,8 @@ public class BenchmarkDataset {
 
     /**
      * 初始化示例数据集。
-     * 如果数据库中已有数据，则从数据库加载；否则初始化示例数据。
+     * 使用数据库中已上传的真实文档 ID 来构建黄金查询，
+     * 确保评测时检索指标的文档 ID 能正确匹配。
      */
     private void initSampleDataset() {
         String sampleDatasetId = "sample-dataset";
@@ -259,39 +265,93 @@ public class BenchmarkDataset {
                         .eq(GoldenQuery::getDatasetId, sampleDatasetId));
 
         if (count != null && count > 0) {
-            // 从数据库加载
-            List<GoldenQuery> queries = goldenQueryMapper.selectList(
+            // 检查已有数据是否使用假的 doc_ 前缀 ID
+            List<GoldenQuery> existing = goldenQueryMapper.selectList(
                     new LambdaQueryWrapper<GoldenQuery>()
                             .eq(GoldenQuery::getDatasetId, sampleDatasetId));
-            datasetCache.put(sampleDatasetId, queries);
-            log.info("Loaded {} golden queries from database for dataset [{}]",
-                    queries.size(), sampleDatasetId);
+            boolean hasFakeIds = existing.stream()
+                    .anyMatch(gq -> gq.getRelevantDocIds() != null
+                            && gq.getRelevantDocIds().contains("doc_"));
+
+            if (!hasFakeIds) {
+                // 数据已是真实 ID，直接加载到缓存
+                datasetCache.put(sampleDatasetId, existing);
+                log.info("Loaded {} golden queries from database for dataset [{}]",
+                        existing.size(), sampleDatasetId);
+                return;
+            }
+
+            // 旧数据使用假的 doc_ ID，删除并重建
+            log.info("Sample dataset has fake doc_ IDs, refreshing with real document IDs...");
+            goldenQueryMapper.delete(
+                    new LambdaQueryWrapper<GoldenQuery>()
+                            .eq(GoldenQuery::getDatasetId, sampleDatasetId));
+        }
+
+        // 查询真实文档（最多取 5 篇）
+        List<Document> realDocs = documentMapper.selectList(
+                new LambdaQueryWrapper<Document>()
+                        .eq(Document::getStatus, 1)
+                        .last("LIMIT 5"));
+
+        if (realDocs.isEmpty()) {
+            // 没有已上传的文档，仍用占位 ID 创建（等用户上传文档后重启即可）
+            log.warn("No uploaded documents found. Sample dataset will use placeholder IDs. "
+                    + "Upload documents and restart to get meaningful evaluation metrics.");
+            addGoldenQuery(sampleDatasetId,
+                    "什么是 RAG（检索增强生成）？",
+                    "RAG 是一种结合检索和生成的 AI 技术，通过从知识库中检索相关信息来增强大语言模型的回答质量。",
+                    serializeDocIds(List.of("doc_001", "doc_002")),
+                    "easy", "AI基础");
+            addGoldenQuery(sampleDatasetId,
+                    "如何评估 RAG 系统的检索质量？",
+                    "可以使用 Recall@K、Precision@K、MRR、NDCG 等指标来评估检索质量。",
+                    serializeDocIds(List.of("doc_003", "doc_004")),
+                    "medium", "评估方法");
+            addGoldenQuery(sampleDatasetId,
+                    "RRF 融合算法的原理是什么？",
+                    "Reciprocal Rank Fusion 通过计算每个文档在各排名列表中的倒数排名之和来进行融合排序。",
+                    serializeDocIds(List.of("doc_005")),
+                    "medium", "检索算法");
             return;
         }
 
-        // 初始化示例数据
+        // 用真实文档 ID 创建黄金查询
+        List<String> realDocIds = realDocs.stream()
+                .map(d -> String.valueOf(d.getId()))
+                .collect(Collectors.toList());
+
+        log.info("Creating sample dataset with {} real document IDs: {}",
+                realDocIds.size(), realDocIds);
+
+        // 根据文档数量分配 relevantDocIds
+        List<String> firstBatch = realDocIds.subList(0, Math.min(2, realDocIds.size()));
+        List<String> secondBatch = realDocIds.size() >= 4
+                ? realDocIds.subList(2, 4)
+                : realDocIds.subList(0, Math.min(2, realDocIds.size()));
+        List<String> thirdBatch = realDocIds.size() >= 5
+                ? realDocIds.subList(4, 5)
+                : realDocIds.subList(0, Math.min(1, realDocIds.size()));
+
         addGoldenQuery(sampleDatasetId,
                 "什么是 RAG（检索增强生成）？",
                 "RAG 是一种结合检索和生成的 AI 技术，通过从知识库中检索相关信息来增强大语言模型的回答质量。",
-                serializeDocIds(List.of("doc_001", "doc_002")),
-                "easy",
-                "AI基础");
+                serializeDocIds(firstBatch),
+                "easy", "AI基础");
 
         addGoldenQuery(sampleDatasetId,
                 "如何评估 RAG 系统的检索质量？",
                 "可以使用 Recall@K、Precision@K、MRR、NDCG 等指标来评估检索质量。",
-                serializeDocIds(List.of("doc_003", "doc_004")),
-                "medium",
-                "评估方法");
+                serializeDocIds(secondBatch),
+                "medium", "评估方法");
 
         addGoldenQuery(sampleDatasetId,
                 "RRF 融合算法的原理是什么？",
                 "Reciprocal Rank Fusion 通过计算每个文档在各排名列表中的倒数排名之和来进行融合排序。",
-                serializeDocIds(List.of("doc_005")),
-                "medium",
-                "检索算法");
+                serializeDocIds(thirdBatch),
+                "medium", "检索算法");
 
-        log.info("Initialized sample dataset [{}] with {} queries",
+        log.info("Initialized sample dataset [{}] with {} queries using real doc IDs",
                 sampleDatasetId, datasetCache.get(sampleDatasetId).size());
     }
 
