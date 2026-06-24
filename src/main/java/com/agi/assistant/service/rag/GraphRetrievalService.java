@@ -61,9 +61,11 @@ public class GraphRetrievalService {
     private final Driver neo4jDriver;
     private final WebClient llmWebClient;
     private final ObjectMapper objectMapper;
+    private final OpenAIConfig openAIConfig;
 
     public GraphRetrievalService(@Nullable Driver neo4jDriver, OpenAIConfig openAIConfig) {
         this.neo4jDriver = neo4jDriver;
+        this.openAIConfig = openAIConfig;
         this.objectMapper = new ObjectMapper();
         this.llmWebClient = WebClient.builder()
                 .baseUrl(openAIConfig.getBaseUrl())
@@ -92,7 +94,7 @@ public class GraphRetrievalService {
             String prompt = ENTITY_EXTRACTION_PROMPT + text;
 
             Map<String, Object> requestBody = Map.of(
-                    "model", "default",
+                    "model", openAIConfig.getModel(),
                     "messages", List.of(Map.of("role", "user", "content", prompt)),
                     "temperature", 0.1,
                     "max_tokens", 2000

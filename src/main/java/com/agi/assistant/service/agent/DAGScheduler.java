@@ -5,6 +5,8 @@ import com.agi.assistant.model.enums.TaskStatus;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import org.springframework.beans.factory.annotation.Qualifier;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -14,8 +16,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.Executor;
 
 /**
  * DAG-based task scheduler.
@@ -28,11 +29,10 @@ import java.util.concurrent.Executors;
 @Service
 public class DAGScheduler {
 
-    private final ExecutorService executor;
+    private final Executor executor;
 
-    public DAGScheduler() {
-        this.executor = Executors.newFixedThreadPool(
-                Runtime.getRuntime().availableProcessors());
+    public DAGScheduler(@Qualifier("dagExecutor") Executor executor) {
+        this.executor = executor;
     }
 
     // ----------------------------------------------------------------
@@ -284,9 +284,12 @@ public class DAGScheduler {
 
     /**
      * Shutdown the executor service.
+     * <p>
+     * Note: The executor is now managed by Spring, so this is a no-op.
+     * Spring will handle shutdown via ThreadPoolTaskExecutor's
+     * waitForTasksToCompleteOnShutdown setting.
      */
     public void shutdown() {
-        executor.shutdown();
-        log.info("DAGScheduler executor shut down");
+        log.info("DAGScheduler shutdown requested (executor is Spring-managed, no-op)");
     }
 }

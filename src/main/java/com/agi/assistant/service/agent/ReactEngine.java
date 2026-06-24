@@ -1,5 +1,6 @@
 package com.agi.assistant.service.agent;
 
+import com.agi.assistant.config.OpenAIConfig;
 import com.agi.assistant.model.entity.SearchResult;
 import com.agi.assistant.model.enums.TaskStatus;
 import com.agi.assistant.model.enums.ToolStatus;
@@ -54,15 +55,18 @@ public class ReactEngine {
     private final WebClient openAiWebClient;
     private final ToolRegistry toolRegistry;
     private final HybridRetrievalService hybridRetrievalService;
+    private final OpenAIConfig openAIConfig;
     private final Map<String, List<ReActStep>> stepCache;
     private final ObjectMapper objectMapper;
 
     public ReactEngine(@Lazy WebClient openAiWebClient,
                        ToolRegistry toolRegistry,
-                       @Lazy HybridRetrievalService hybridRetrievalService) {
+                       @Lazy HybridRetrievalService hybridRetrievalService,
+                       OpenAIConfig openAIConfig) {
         this.openAiWebClient = openAiWebClient;
         this.toolRegistry = toolRegistry;
         this.hybridRetrievalService = hybridRetrievalService;
+        this.openAIConfig = openAIConfig;
         this.stepCache = new LinkedHashMap<>(100, 0.75f, true) {
             @Override
             protected boolean removeEldestEntry(Map.Entry<String, List<ReActStep>> eldest) {
@@ -195,7 +199,7 @@ public class ReactEngine {
             String prompt = REACT_SYSTEM_PROMPT + "\n\n" + context;
 
             Map<String, Object> requestBody = Map.of(
-                    "model", "default",
+                    "model", openAIConfig.getModel(),
                     "messages", List.of(
                             Map.of("role", "system", "content", REACT_SYSTEM_PROMPT),
                             Map.of("role", "user", "content", context)

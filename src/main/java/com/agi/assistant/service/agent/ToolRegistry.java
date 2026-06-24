@@ -2,6 +2,7 @@ package com.agi.assistant.service.agent;
 
 import com.agi.assistant.model.enums.ToolRiskLevel;
 import com.agi.assistant.model.enums.ToolStatus;
+import com.agi.assistant.service.security.ToolRiskClassifier;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -29,6 +30,11 @@ import java.util.function.Function;
 public class ToolRegistry {
 
     private final Map<String, ToolDefinition> tools = new ConcurrentHashMap<>();
+    private final ToolRiskClassifier toolRiskClassifier;
+
+    public ToolRegistry(ToolRiskClassifier toolRiskClassifier) {
+        this.toolRiskClassifier = toolRiskClassifier;
+    }
 
     // ----------------------------------------------------------------
     //  Public API
@@ -130,8 +136,17 @@ public class ToolRegistry {
             return errorResult;
         }
 
+        // 使用 ToolRiskClassifier 进行动态风险分类
+        String paramsStr = params != null ? params.toString() : null;
+        ToolRiskLevel classifiedRisk = toolRiskClassifier.classify(name, paramsStr);
+        ToolRiskLevel effectiveRisk = classifiedRisk.ordinal() > tool.getRiskLevel().ordinal()
+                ? classifiedRisk : tool.getRiskLevel();
+
+        log.debug("Tool [{}] risk check: registered={}, classified={}, effective={}",
+                name, tool.getRiskLevel(), classifiedRisk, effectiveRisk);
+
         // Risk level check
-        switch (tool.getRiskLevel()) {
+        switch (effectiveRisk) {
             case BLOCK:
                 log.warn("Tool [{}] is BLOCKED, refusing execution", name);
                 Map<String, Object> blockedResult = new ConcurrentHashMap<>();

@@ -112,7 +112,25 @@
       </template>
 
       <div class="comparison-content">
-        <pre class="comparison-json">{{ JSON.stringify(evaluationStore.comparison, null, 2) }}</pre>
+        <!-- 对比表格：高亮最优值 -->
+        <ComparisonTable :comparison="evaluationStore.comparison" />
+
+        <!-- 指标柱状图 -->
+        <div class="chart-container">
+          <h4>指标可视化</h4>
+          <MetricsChart
+            :data="evaluationStore.comparison.metrics"
+            :labels="evaluationStore.comparison.taskNames"
+            :metrics="Object.keys(evaluationStore.comparison.metrics)"
+          />
+        </div>
+
+        <!-- 原始 JSON（可折叠） -->
+        <el-collapse>
+          <el-collapse-item title="原始 JSON 数据" name="json">
+            <pre class="comparison-json">{{ JSON.stringify(evaluationStore.comparison, null, 2) }}</pre>
+          </el-collapse-item>
+        </el-collapse>
       </div>
     </el-card>
 
@@ -130,7 +148,7 @@
               :value="ds.datasetId"
             />
           </el-select>
-          <div v-if="datasets.length === 0" style="color: #909399; font-size: 12px; margin-top: 4px;">
+          <div v-if="datasets.length === 0" style="color: var(--color-text-tertiary); font-size: 12px; margin-top: 4px;">
             暂无可用数据集，请联系管理员添加
           </div>
         </el-form-item>
@@ -163,6 +181,8 @@ import {
 } from '@element-plus/icons-vue'
 import { useEvaluationStore } from '@/stores/evaluation'
 import * as evaluationApi from '@/api/evaluation'
+import ComparisonTable from '@/components/evaluation/ComparisonTable.vue'
+import MetricsChart from '@/components/evaluation/MetricsChart.vue'
 import type { EvaluationTask } from '@/types'
 import dayjs from 'dayjs'
 
@@ -219,8 +239,13 @@ async function handleViewResults(task: EvaluationTask) {
 }
 
 function handleCompare(task: EvaluationTask) {
+  if (selectedForCompare.value.includes(task.id)) {
+    // 取消选择
+    selectedForCompare.value = selectedForCompare.value.filter(id => id !== task.id)
+    return
+  }
   if (selectedForCompare.value.length >= 2) {
-    ElMessage.warning('最多选择2个任务进行对比')
+    ElMessage.warning('最多选择2个任务进行对比，请先取消一个')
     return
   }
   selectedForCompare.value.push(task.id)
@@ -327,12 +352,12 @@ onMounted(() => {
 .page-header h2 {
   margin: 0 0 8px;
   font-size: 24px;
-  color: #303133;
+  color: var(--color-text-primary);
 }
 
 .page-header p {
   margin: 0;
-  color: #909399;
+  color: var(--color-text-tertiary);
   font-size: 14px;
 }
 
@@ -358,8 +383,8 @@ onMounted(() => {
   bottom: 24px;
   left: 50%;
   transform: translateX(-50%);
-  background: #303133;
-  color: #fff;
+  background: var(--color-text-primary);
+  color: var(--color-text-inverse);
   padding: 12px 24px;
   border-radius: 8px;
   display: flex;
@@ -376,8 +401,8 @@ onMounted(() => {
 }
 
 .comparison-json {
-  background: #f5f7fa;
-  border: 1px solid #e4e7ed;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 16px;
   font-size: 13px;
@@ -385,5 +410,15 @@ onMounted(() => {
   overflow-x: auto;
   max-height: 500px;
   overflow-y: auto;
+}
+
+.chart-container {
+  margin-top: 16px;
+}
+
+.chart-container h4 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  color: var(--color-text-primary);
 }
 </style>

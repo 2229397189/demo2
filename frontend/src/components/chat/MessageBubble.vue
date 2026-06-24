@@ -1,10 +1,10 @@
 <template>
   <div class="message-bubble" :class="[message.role]">
     <div class="message-avatar">
-      <el-avatar v-if="message.role === 'user'" :size="36" style="background-color: #409eff">
+      <el-avatar v-if="message.role === 'user'" :size="36" style="background-color: var(--color-primary)">
         <el-icon><User /></el-icon>
       </el-avatar>
-      <el-avatar v-else :size="36" style="background-color: #67c23a">
+      <el-avatar v-else :size="36" style="background-color: var(--color-success)">
         <el-icon><ChatDotRound /></el-icon>
       </el-avatar>
     </div>
@@ -36,6 +36,15 @@
         </transition>
       </div>
       <div class="message-body" :class="{ 'streaming': isStreaming }" v-html="renderedContent" />
+      <!-- 消息操作按钮 -->
+      <div v-if="message.role === 'assistant' && !isStreaming && message.content" class="message-actions">
+        <button class="action-btn" @click="handleCopy" title="复制">
+          <el-icon><CopyDocument /></el-icon>
+        </button>
+        <button v-if="isLast" class="action-btn" @click="$emit('regenerate')" title="重新生成">
+          <el-icon><RefreshRight /></el-icon>
+        </button>
+      </div>
       <SourceReference v-if="message.sources?.length" :sources="message.sources" />
       <SourceReference v-if="message.webResults?.length" :sources="message.webResults" />
       <SandboxResult
@@ -49,7 +58,8 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { User, ChatDotRound, Loading, CircleCheck, ArrowDown } from '@element-plus/icons-vue'
+import { User, ChatDotRound, Loading, CircleCheck, ArrowDown, CopyDocument, RefreshRight } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
@@ -61,7 +71,21 @@ import dayjs from 'dayjs'
 const props = defineProps<{
   message: ChatMessage
   isStreaming?: boolean
+  isLast?: boolean
 }>()
+
+defineEmits<{
+  regenerate: []
+}>()
+
+async function handleCopy() {
+  try {
+    await navigator.clipboard.writeText(props.message.content)
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    ElMessage.error('复制失败')
+  }
+}
 
 const showThinking = ref(true)
 
@@ -70,7 +94,7 @@ function toggleThinking() {
 }
 
 const md = new MarkdownIt({
-  html: true,
+  html: false,
   linkify: true,
   typographer: true,
   highlight(str: string, lang: string) {
@@ -134,16 +158,16 @@ function formatTime(date: string) {
 .message-role {
   font-size: 12px;
   font-weight: 600;
-  color: #606266;
+  color: var(--color-text-secondary);
 }
 
 .message-time {
   font-size: 11px;
-  color: #909399;
+  color: var(--color-text-tertiary);
 }
 
 .message-body {
-  background: #fff;
+  background: var(--color-bg-primary);
   padding: 12px 16px;
   border-radius: 12px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
@@ -152,8 +176,39 @@ function formatTime(date: string) {
 }
 
 .message-bubble.user .message-body {
-  background: #ecf5ff;
-  color: #303133;
+  background: var(--color-primary-bg, #ecf5ff);
+  color: var(--color-text-primary);
+}
+
+.message-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.message-bubble:hover .message-actions {
+  opacity: 1;
+}
+
+.action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.action-btn:hover {
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
 }
 
 .message-body :deep(pre) {
@@ -179,10 +234,10 @@ function formatTime(date: string) {
 }
 
 .message-body :deep(blockquote) {
-  border-left: 3px solid #dcdfe6;
+  border-left: 3px solid var(--color-border);
   padding-left: 12px;
   margin: 8px 0;
-  color: #606266;
+  color: var(--color-text-secondary);
 }
 
 .message-body :deep(table) {
@@ -193,22 +248,22 @@ function formatTime(date: string) {
 
 .message-body :deep(th),
 .message-body :deep(td) {
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--color-border);
   padding: 8px;
   text-align: left;
 }
 
 .message-body :deep(th) {
-  background: #f5f7fa;
+  background: var(--color-bg-secondary);
 }
 
 /* Thinking process styles */
 .thinking-process {
   margin-bottom: 12px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--color-border);
   border-radius: 8px;
   overflow: hidden;
-  background: #fafafa;
+  background: var(--color-bg-secondary);
 }
 
 .thinking-header {
@@ -218,13 +273,13 @@ function formatTime(date: string) {
   padding: 10px 14px;
   cursor: pointer;
   font-size: 13px;
-  color: #606266;
+  color: var(--color-text-secondary);
   font-weight: 500;
   transition: background-color 0.2s;
 }
 
 .thinking-header:hover {
-  background: #f0f2f5;
+  background: var(--color-bg-tertiary);
 }
 
 .expand-icon {
@@ -246,8 +301,8 @@ function formatTime(date: string) {
   gap: 8px;
   padding: 6px 0;
   font-size: 12px;
-  color: #909399;
-  border-bottom: 1px dashed #ebeef5;
+  color: var(--color-text-tertiary);
+  border-bottom: 1px dashed var(--color-border-light);
 }
 
 .thinking-step:last-child {
@@ -262,13 +317,13 @@ function formatTime(date: string) {
 .thinking-step.websearch .el-icon,
 .thinking-step.memory .el-icon,
 .thinking-step.generation .el-icon {
-  color: #409eff;
+  color: var(--color-primary);
 }
 
 .thinking-step.retrieval_done .el-icon,
 .thinking-step.websearch_done .el-icon,
 .thinking-step.memory_done .el-icon {
-  color: #67c23a;
+  color: var(--color-success);
 }
 
 .rotating {
@@ -284,7 +339,7 @@ function formatTime(date: string) {
 .message-body.streaming::after {
   content: '▋';
   display: inline-block;
-  color: #409eff;
+  color: var(--color-primary);
   animation: blink 0.8s infinite;
   margin-left: 2px;
   font-weight: bold;

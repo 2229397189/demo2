@@ -1,7 +1,7 @@
 <template>
   <div class="chat-view">
     <!-- 会话侧边栏 - 学习 ChatGPT 的设计 -->
-    <aside class="chat-sidebar">
+    <aside class="chat-sidebar" :class="{ open: chatSidebarOpen }">
       <div class="sidebar-header">
         <button class="new-chat-btn" @click="handleCreateSession">
           <el-icon><Plus /></el-icon>
@@ -54,16 +54,27 @@
       </div>
     </aside>
 
+    <!-- 移动端遮罩层 -->
+    <div
+      v-if="chatSidebarOpen"
+      class="sidebar-overlay"
+      @click="chatSidebarOpen = false"
+    />
+
     <!-- 主聊天区 -->
     <main class="chat-main">
       <!-- 聊天头部 -->
       <header class="chat-header" v-if="chatStore.currentSession">
         <div class="header-left">
+          <button class="mobile-menu-btn hide-desktop" @click="toggleChatSidebar">
+            <el-icon :size="20"><Operation /></el-icon>
+          </button>
           <h2>{{ chatStore.currentSession.title }}</h2>
         </div>
         <div class="header-right">
           <el-select v-model="retrievalStrategy" size="small" class="strategy-select">
             <el-option label="混合检索" value="hybrid" />
+            <el-option label="🚀 竞速检索" value="race" />
             <el-option label="稠密检索" value="dense" />
             <el-option label="稀疏检索" value="sparse" />
             <el-option label="图谱检索" value="graph" />
@@ -83,6 +94,7 @@
       <ChatWindow
         :messages="chatStore.messages"
         :is-streaming="chatStore.isStreaming"
+        @regenerate="handleRegenerate"
       />
 
       <!-- 输入区域 -->
@@ -99,14 +111,24 @@
               :disabled="chatStore.isStreaming"
               resize="none"
             />
+            <!-- 停止生成按钮（流式传输中显示） -->
             <button
-              class="send-btn"
-              :class="{ active: inputMessage.trim() && !chatStore.isStreaming }"
-              @click="handleSend"
-              :disabled="!inputMessage.trim() || chatStore.isStreaming"
+              v-if="chatStore.isStreaming"
+              class="stop-btn"
+              @click="handleStop"
+              title="停止生成"
             >
-              <el-icon v-if="!chatStore.isStreaming"><Promotion /></el-icon>
-              <el-icon v-else class="spin"><Loading /></el-icon>
+              <el-icon><VideoPause /></el-icon>
+            </button>
+            <!-- 发送按钮（非流式时显示） -->
+            <button
+              v-else
+              class="send-btn"
+              :class="{ active: inputMessage.trim() }"
+              @click="handleSend"
+              :disabled="!inputMessage.trim()"
+            >
+              <el-icon><Promotion /></el-icon>
             </button>
           </div>
           <div class="input-hint">
@@ -159,6 +181,8 @@ import {
   Cpu,
   Search,
   Loading,
+  Operation,
+  VideoPause,
 } from '@element-plus/icons-vue'
 import { useChatStore } from '@/stores/chat'
 import type { ChatSession } from '@/types'
@@ -169,8 +193,13 @@ const chatStore = useChatStore()
 const router = useRouter()
 const searchText = ref('')
 const inputMessage = ref('')
-const retrievalStrategy = ref<'none' | 'dense' | 'sparse' | 'graph' | 'hybrid'>('hybrid')
+const retrievalStrategy = ref<'none' | 'dense' | 'sparse' | 'graph' | 'hybrid' | 'race'>('hybrid')
 const useMemory = ref(true)
+const chatSidebarOpen = ref(false)
+
+function toggleChatSidebar() {
+  chatSidebarOpen.value = !chatSidebarOpen.value
+}
 
 // 功能卡片配置
 const features = [
@@ -250,6 +279,21 @@ function handleSend() {
   if (!content) return
   chatStore.sendMessage(content, retrievalStrategy.value, useMemory.value)
   inputMessage.value = ''
+}
+
+function handleStop() {
+  chatStore.stopStreaming()
+}
+
+function handleRegenerate() {
+  // 找到最后一条用户消息并重新发送
+  const msgs = chatStore.messages
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'user') {
+      chatStore.sendMessage(msgs[i].content, retrievalStrategy.value, useMemory.value)
+      return
+    }
+  }
 }
 
 function handleKeydown(e: KeyboardEvent) {
@@ -508,6 +552,32 @@ onMounted(() => {
   background-color: var(--color-primary-dark);
 }
 
+.stop-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 2px solid var(--color-danger);
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--color-danger);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+  animation: pulse-border 1.5s ease-in-out infinite;
+}
+
+.stop-btn:hover {
+  background: var(--color-danger);
+  color: white;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: var(--color-danger); }
+  50% { border-color: var(--color-danger-light, #f87171); }
+}
+
 .input-hint {
   text-align: center;
   margin-top: var(--space-2);
@@ -618,6 +688,34 @@ onMounted(() => {
   color: var(--color-text-secondary);
 }
 
+/* ── 移动端遮罩层 ── */
+.sidebar-overlay {
+  display: none;
+}
+
+/* ── 移动端菜单按钮 ── */
+.mobile-menu-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.mobile-menu-btn:hover {
+  background: var(--color-bg-tertiary);
+}
+
+.hide-desktop {
+  display: none;
+}
+
 /* ── 响应式设计 ── */
 @media (max-width: 1024px) {
   .feature-grid {
@@ -626,6 +724,18 @@ onMounted(() => {
 }
 
 @media (max-width: 768px) {
+  .hide-desktop {
+    display: flex;
+  }
+
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: var(--color-bg-overlay);
+    z-index: 99;
+  }
+
   .chat-sidebar {
     position: fixed;
     left: 0;

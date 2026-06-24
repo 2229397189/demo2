@@ -17,12 +17,19 @@ import com.agi.assistant.service.memory.MemoryConsolidation;
 import com.agi.assistant.service.memory.ShortTermMemory;
 import com.agi.assistant.service.rag.HybridRetrievalService;
 import com.agi.assistant.service.rag.WebSearchService;
+import com.agi.assistant.service.security.InputValidator;
+import com.agi.assistant.service.agent.ReactEngine;
+import com.agi.assistant.service.agent.RaceStrategy;
+import com.agi.assistant.service.harness.HarnessRuntime;
+import com.agi.assistant.model.enums.RetrievalStrategy;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.core.io.Resource;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -70,6 +77,26 @@ public class ChatServiceImpl implements ChatService {
     private final WebClient streamingWebClient;
     private final WebSearchService webSearchService;
     private final SandboxService sandboxService;
+    private final InputValidator inputValidator;
+    private final ReactEngine reactEngine;
+    private final RaceStrategy raceStrategy;
+    private final HarnessRuntime harnessRuntime;
+
+    @Value("classpath:prompts/system-prompt.md")
+    private Resource systemPromptResource;
+
+    /** 缓存模板内容，避免每次请求都读文件 */
+    private volatile String cachedSystemPromptTemplate;
+
+    /** 复杂问题判定阈值：消息长度超过此值时考虑使用 ReAct 模式 */
+    private static final int COMPLEX_QUERY_THRESHOLD = 100;
+
+    /** 复杂问题关键词 */
+    private static final List<String> COMPLEX_KEYWORDS = List.of(
+            "分析", "对比", "比较", "总结", "归纳", "推理", "为什么",
+            "怎么做", "如何", "步骤", "流程", "方案", "设计",
+            "analyze", "compare", "summarize", "reason", "explain"
+    );
 
     public ChatServiceImpl(ChatSessionMapper chatSessionMapper,
                            ChatMessageMapper chatMessageMapper,
@@ -81,7 +108,11 @@ public class ChatServiceImpl implements ChatService {
                            ObjectMapper objectMapper,
                            @Qualifier("streamingWebClient") WebClient streamingWebClient,
                            WebSearchService webSearchService,
-                           SandboxService sandboxService) {
+                           SandboxService sandboxService,
+                           InputValidator inputValidator,
+                           ReactEngine reactEngine,
+                           RaceStrategy raceStrategy,
+                           HarnessRuntime harnessRuntime) {
         this.chatSessionMapper = chatSessionMapper;
         this.chatMessageMapper = chatMessageMapper;
         this.hybridRetrievalService = hybridRetrievalService;
@@ -93,6 +124,10 @@ public class ChatServiceImpl implements ChatService {
         this.streamingWebClient = streamingWebClient;
         this.webSearchService = webSearchService;
         this.sandboxService = sandboxService;
+        this.inputValidator = inputValidator;
+        this.reactEngine = reactEngine;
+        this.raceStrategy = raceStrategy;
+        this.harnessRuntime = harnessRuntime;
     }
 
     @Override
@@ -100,6 +135,19 @@ public class ChatServiceImpl implements ChatService {
         log.info("Stream chat: userId={}, sessionId={}, message length={}",
                 userId, request.getSessionId(),
                 request.getMessage() != null ? request.getMessage().length() : 0);
+
+        // 输入安全验证
+        if (request.getMessage() != null && !inputValidator.isValid(request.getMessage())) {
+            log.warn("Input validation failed for userId={}", userId);
+            try {
+                emitter.send(SseEmitter.event()
+                        .name("error")
+                        .data("输入内容包含不安全的字符或模式，请检查后重试。"));
+            } catch (IOException ignored) {
+            }
+            emitter.complete();
+            return;
+        }
 
         try {
             // 1. Ensure session exists
@@ -119,69 +167,123 @@ public class ChatServiceImpl implements ChatService {
             chatMessageMapper.insert(userMessage);
 
             // Save to short-term memory
-            shortTermMemory.addMessage(userId.toString(), userMessage);
+            shortTermMemory.addMessage(sessionId.toString(), userMessage);
 
-            // 3. RAG retrieval
+            // 3. 并行检索：RaceStrategy 竞速 + HarnessRuntime 超时保障
             List<SearchResult> searchResults = new ArrayList<>();
             String strategy = request.getRetrievalStrategy() != null
                     ? request.getRetrievalStrategy() : "HYBRID";
-            try {
-                // 发送思考过程：开始检索
-                sendThinkingEvent(emitter, "retrieval", "正在检索知识库...");
 
-                searchResults = hybridRetrievalService.retrieve(
-                        request.getMessage(), strategy, 5);
-                if (!searchResults.isEmpty()) {
-                    // 使用 Map 对象，让 Spring 自动序列化
-                    Map<String, Object> sourceData = new HashMap<>();
-                    sourceData.put("type", "source");
-                    sourceData.put("content", searchResults);
-                    emitter.send(SseEmitter.event()
-                            .name("source")
-                            .data(sourceData));
-                    // 发送思考过程：检索完成
-                    sendThinkingEvent(emitter, "retrieval_done",
-                            "检索到 " + searchResults.size() + " 条相关内容");
+            sendThinkingEvent(emitter, "retrieval", "正在多路竞速检索知识库...");
+
+            // 使用 RaceStrategy 竞速多种检索策略
+            searchResults = harnessRuntime.execute(() -> {
+                if ("RACE".equalsIgnoreCase(strategy)) {
+                    // 竞速模式：DENSE / SPARSE / GRAPH 三路竞赛，取最快返回
+                    List<RetrievalStrategy> strategies = List.of(
+                            com.agi.assistant.model.enums.RetrievalStrategy.DENSE,
+                            com.agi.assistant.model.enums.RetrievalStrategy.SPARSE,
+                            com.agi.assistant.model.enums.RetrievalStrategy.GRAPH
+                    );
+                    return raceStrategy.raceRetrieve(strategies, request.getMessage());
+                } else {
+                    // 指定策略模式，带超时重试保障
+                    return hybridRetrievalService.retrieve(request.getMessage(), strategy, 5);
                 }
-            } catch (Exception e) {
-                log.warn("RAG retrieval failed, continuing without context: {}", e.getMessage());
+            }, "rag-retrieval", 5000);
+
+            if (searchResults != null && !searchResults.isEmpty()) {
+                Map<String, Object> sourceData = new HashMap<>();
+                sourceData.put("type", "source");
+                sourceData.put("content", searchResults);
+                emitter.send(SseEmitter.event().name("source").data(sourceData));
+                sendThinkingEvent(emitter, "retrieval_done",
+                        "检索到 " + searchResults.size() + " 条相关内容");
+            } else {
+                searchResults = new ArrayList<>();
+                sendThinkingEvent(emitter, "retrieval_done", "检索超时或无结果，继续生成回答");
             }
 
-            // 4. Web search (if message contains search keywords)
+            // 4. Web search（条件触发 + HarnessRuntime 超时保障）
             List<SearchResult> webResults = new ArrayList<>();
             if (needsWebSearch(request.getMessage())) {
+                sendThinkingEvent(emitter, "websearch", "正在搜索网络...");
                 try {
-                    sendThinkingEvent(emitter, "websearch", "正在搜索网络...");
-
-                    webResults = webSearchService.search(request.getMessage(), 5);
-                    if (!webResults.isEmpty()) {
-                        // 使用 Map 对象，让 Spring 自动序列化
+                    webResults = harnessRuntime.execute(() ->
+                                    webSearchService.search(request.getMessage(), 5),
+                            "web-search", 10000);
+                    if (webResults != null && !webResults.isEmpty()) {
                         Map<String, Object> webData = new HashMap<>();
                         webData.put("type", "websearch");
                         webData.put("content", webResults);
-                        emitter.send(SseEmitter.event()
-                                .name("websearch")
-                                .data(webData));
+                        emitter.send(SseEmitter.event().name("websearch").data(webData));
                         sendThinkingEvent(emitter, "websearch_done",
                                 "网络搜索完成，找到 " + webResults.size() + " 条结果");
-                        log.info("Web search returned {} results for query", webResults.size());
                     }
                 } catch (Exception e) {
-                    log.warn("Web search failed: {}", e.getMessage());
+                    log.warn("Web search failed or timed out: {}", e.getMessage());
+                    webResults = new ArrayList<>();
                 }
             }
 
-            // 5. Build context-enriched prompt
+            // 5. 记忆查询（HarnessRuntime 超时保障）
             Map<String, Object> context = new HashMap<>();
             if (request.isUseMemory()) {
+                sendThinkingEvent(emitter, "memory", "正在查询记忆系统...");
                 try {
-                    sendThinkingEvent(emitter, "memory", "正在查询记忆系统...");
-
-                    context = contextAssembly.assembleContext(userId, request.getMessage());
-
+                    context = harnessRuntime.execute(() ->
+                                    contextAssembly.assembleContext(userId, request.getMessage()),
+                            "memory-assembly", 5000);
                     sendThinkingEvent(emitter, "memory_done", "记忆查询完成");
                 } catch (Exception e) {
-                    log.warn("Memory assembly failed: {}", e.getMessage());
+                    log.warn("Memory assembly failed or timed out: {}", e.getMessage());
+                    context = new HashMap<>();
+                }
+            }
+
+            // 6. 复杂问题检测 → ReAct 推理模式
+            if (isComplexQuery(request.getMessage())) {
+                sendThinkingEvent(emitter, "react", "检测到复杂问题，启动 ReAct 多步推理...");
+                try {
+                    String reactAnswer = harnessRuntime.execute(() ->
+                                    reactEngine.run(request.getMessage(), 5),
+                            "react-engine", 60000);
+
+                    if (reactAnswer != null && !reactAnswer.isBlank()
+                            && !reactAnswer.startsWith("经过多轮推理")) {
+                        // ReAct 成功产出答案，直接使用
+                        sendThinkingEvent(emitter, "react_done", "ReAct 推理完成");
+
+                        // 发送 ReAct 答案
+                        Map<String, Object> reactData = new HashMap<>();
+                        reactData.put("type", "content");
+                        reactData.put("content", reactAnswer);
+                        emitter.send(SseEmitter.event().name("content").data(reactData));
+
+                        // 保存消息
+                        ChatMessage assistantMessage = new ChatMessage();
+                        assistantMessage.setSessionId(sessionId);
+                        assistantMessage.setRole("assistant");
+                        assistantMessage.setContent(reactAnswer);
+                        assistantMessage.setCreatedAt(LocalDateTime.now());
+                        chatMessageMapper.insert(assistantMessage);
+                        shortTermMemory.addMessage(sessionId.toString(), assistantMessage);
+
+                        // 代码块检测与执行
+                        executeCodeBlocks(reactAnswer, emitter);
+
+                        // 异步记忆整合
+                        CompletableFuture.runAsync(() -> {
+                            try { memoryConsolidation.consolidate(userId); } catch (Exception ignored) {}
+                        });
+
+                        sendThinkingEvent(emitter, "done", "回答完成");
+                        emitter.complete();
+                        return; // ReAct 模式完成，跳过后续 LLM 流式调用
+                    }
+                } catch (Exception e) {
+                    log.warn("ReAct engine failed, falling back to normal mode: {}", e.getMessage());
+                    sendThinkingEvent(emitter, "react_done", "ReAct 推理失败，切换到普通模式");
                 }
             }
 
@@ -271,7 +373,7 @@ public class ChatServiceImpl implements ChatService {
                                     chatMessageMapper.insert(assistantMessage);
 
                                     // Save to short-term memory
-                                    shortTermMemory.addMessage(userId.toString(), assistantMessage);
+                                    shortTermMemory.addMessage(sessionId.toString(), assistantMessage);
 
                                     // 9. Consolidate memory (async)
                                     CompletableFuture.runAsync(() -> {
@@ -483,37 +585,80 @@ public class ChatServiceImpl implements ChatService {
 
     private String buildSystemPrompt(Map<String, Object> context,
                                      List<SearchResult> searchResults) {
-        StringBuilder prompt = new StringBuilder();
-        prompt.append("你是一个智能学习助手。基于提供的上下文和你的知识回答用户的问题。\n\n");
-        prompt.append("如果用户要求你写代码，请直接写出完整的代码。");
-        prompt.append("代码会被自动在沙箱环境中执行并返回结果。\n\n");
+        // 从模板文件加载基础提示词（带缓存）
+        String template = loadSystemPromptTemplate();
 
+        // 构建参考资料部分
+        StringBuilder contextSection = new StringBuilder();
         if (!searchResults.isEmpty()) {
-            prompt.append("## 参考资料\n");
+            contextSection.append("## 参考资料\n");
             for (int i = 0; i < searchResults.size(); i++) {
                 SearchResult r = searchResults.get(i);
-                prompt.append("[").append(i + 1).append("] ");
+                contextSection.append("[").append(i + 1).append("] ");
                 if (r.getTitle() != null) {
-                    prompt.append(r.getTitle()).append(": ");
+                    contextSection.append(r.getTitle()).append(": ");
                 }
-                prompt.append(r.getContent()).append("\n");
+                contextSection.append(r.getContent()).append("\n");
             }
-            prompt.append("\n");
         }
 
+        // 构建记忆部分
+        StringBuilder memorySection = new StringBuilder();
         if (context.containsKey("longTermRecall")) {
             @SuppressWarnings("unchecked")
             List<String> recall = (List<String>) context.get("longTermRecall");
             if (recall != null && !recall.isEmpty()) {
-                prompt.append("## 相关记忆\n");
+                memorySection.append("## 相关记忆\n");
                 for (int i = 0; i < recall.size(); i++) {
-                    prompt.append(i + 1).append(". ").append(recall.get(i)).append("\n");
+                    memorySection.append(i + 1).append(". ").append(recall.get(i)).append("\n");
                 }
-                prompt.append("\n");
             }
         }
 
-        return prompt.toString();
+        // 替换模板中的占位符
+        String prompt = template
+                .replace("{context}", contextSection.toString())
+                .replace("{memory}", memorySection.toString());
+
+        // 如果模板中没有占位符（旧模板兼容），直接拼接
+        if (!template.contains("{context}") && !template.contains("{memory}")) {
+            StringBuilder fallback = new StringBuilder(template);
+            if (contextSection.length() > 0) {
+                fallback.append("\n").append(contextSection);
+            }
+            if (memorySection.length() > 0) {
+                fallback.append("\n").append(memorySection);
+            }
+            if (!searchResults.isEmpty()) {
+                fallback.append("\n如果用户要求你写代码，请直接写出完整的代码。");
+                fallback.append("代码会被自动在沙箱环境中执行并返回结果。\n");
+            }
+            return fallback.toString();
+        }
+
+        return prompt;
+    }
+
+    /**
+     * 加载系统提示词模板（带缓存）。
+     */
+    private String loadSystemPromptTemplate() {
+        if (cachedSystemPromptTemplate != null) {
+            return cachedSystemPromptTemplate;
+        }
+        synchronized (this) {
+            if (cachedSystemPromptTemplate != null) {
+                return cachedSystemPromptTemplate;
+            }
+            try {
+                String template = systemPromptResource.getContentAsString(StandardCharsets.UTF_8);
+                cachedSystemPromptTemplate = template;
+                return template;
+            } catch (IOException e) {
+                log.error("Failed to load system prompt template, using fallback: {}", e.getMessage());
+                return "你是一个智能学习助手。基于提供的上下文和你的知识回答用户的问题。\n\n";
+            }
+        }
     }
 
     private List<Map<String, String>> buildMessages(String systemPrompt, Long sessionId,
@@ -549,5 +694,38 @@ public class ChatServiceImpl implements ChatService {
     private String truncate(String text, int maxLen) {
         if (text == null) return "New Chat";
         return text.length() > maxLen ? text.substring(0, maxLen) + "..." : text;
+    }
+
+    /**
+     * 判断是否为复杂问题，需要 ReAct 多步推理。
+     * <p>
+     * 判定条件（满足任一即为复杂）：
+     * 1. 消息长度超过阈值
+     * 2. 包含复杂问题关键词
+     * 3. 包含多个问号
+     */
+    private boolean isComplexQuery(String message) {
+        if (message == null) return false;
+
+        // 条件 1：消息较长
+        if (message.length() > COMPLEX_QUERY_THRESHOLD) {
+            return true;
+        }
+
+        // 条件 2：包含复杂问题关键词
+        String lower = message.toLowerCase();
+        for (String keyword : COMPLEX_KEYWORDS) {
+            if (lower.contains(keyword)) {
+                return true;
+            }
+        }
+
+        // 条件 3：多个问号（多子问题）
+        long questionMarks = message.chars().filter(c -> c == '?' || c == '？').count();
+        if (questionMarks >= 2) {
+            return true;
+        }
+
+        return false;
     }
 }

@@ -70,18 +70,18 @@ function formatValue(value: number): string {
 }
 
 .best-value {
-  color: #67c23a;
+  color: var(--color-success);
   font-weight: 600;
 }
 
 .best-icon {
-  color: #e6a23c;
+  color: var(--color-warning);
   margin-left: 4px;
   vertical-align: middle;
 }
 
 .stat-text {
   font-size: 12px;
-  color: #606266;
+  color: var(--color-text-secondary);
 }
 </style>

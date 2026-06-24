@@ -55,7 +55,7 @@ const hasError = computed(() => !!props.result.error || props.result.exitCode !=
 <style scoped>
 .sandbox-result {
   margin-top: 8px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--color-border);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -65,15 +65,15 @@ const hasError = computed(() => !!props.result.error || props.result.exitCode !=
   align-items: center;
   gap: 6px;
   padding: 8px 12px;
-  background: #f5f7fa;
+  background: var(--color-bg-secondary);
   cursor: pointer;
   font-size: 13px;
-  color: #606266;
+  color: var(--color-text-secondary);
   user-select: none;
 }
 
 .sandbox-header:hover {
-  background: #ecf5ff;
+  background: var(--color-primary-bg, #ecf5ff);
 }
 
 .expand-icon {
@@ -139,34 +139,34 @@ const hasError = computed(() => !!props.result.error || props.result.exitCode !=
 }
 
 .output-header {
-  background: #f0f9eb;
-  color: #67c23a;
+  background: var(--color-success-bg, #f0f9eb);
+  color: var(--color-success);
 }
 
 .error-header {
-  background: #fef0f0;
-  color: #f56c6c;
+  background: var(--color-danger-bg, #fef0f0);
+  color: var(--color-danger);
 }
 
 .output-content {
   margin: 0;
   padding: 10px;
-  background: #fafafa;
+  background: var(--color-bg-secondary);
   font-size: 13px;
   line-height: 1.5;
   overflow-x: auto;
   max-height: 200px;
-  color: #303133;
+  color: var(--color-text-primary);
 }
 
 .error-content {
   margin: 0;
   padding: 10px;
-  background: #fff5f5;
+  background: var(--color-danger-bg, #fff5f5);
   font-size: 13px;
   line-height: 1.5;
   overflow-x: auto;
   max-height: 200px;
-  color: #f56c6c;
+  color: var(--color-danger);
 }
 </style>

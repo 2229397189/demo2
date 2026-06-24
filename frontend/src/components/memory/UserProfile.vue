@@ -80,13 +80,13 @@ defineProps<{
 
 .profile-item label {
   font-size: 12px;
-  color: #909399;
+  color: var(--color-text-tertiary);
   font-weight: 500;
 }
 
 .profile-item span {
   font-size: 14px;
-  color: #303133;
+  color: var(--color-text-primary);
 }
 
 .facts-list,

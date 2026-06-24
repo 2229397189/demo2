@@ -1,7 +1,7 @@
 <template>
   <el-container class="app-layout">
     <!-- 侧边栏 - 学习 ChatGPT 的简洁设计 -->
-    <el-aside :width="isCollapsed ? '64px' : '260px'" class="app-sidebar sidebar-transition">
+    <el-aside :width="isCollapsed ? '64px' : '260px'" class="app-sidebar sidebar-transition" :class="{ 'mobile-open': mobileMenuOpen }">
       <!-- Logo 区域 -->
       <div class="sidebar-header">
         <div class="logo-container" @click="isCollapsed = !isCollapsed">
@@ -52,8 +52,19 @@
       </div>
     </el-aside>
 
+    <!-- 移动端遮罩层 -->
+    <div
+      v-if="mobileMenuOpen"
+      class="mobile-overlay"
+      @click="mobileMenuOpen = false"
+    />
+
     <!-- 主内容区 -->
     <el-main class="app-main">
+      <!-- 移动端菜单按钮 -->
+      <button class="app-mobile-menu-btn" @click="mobileMenuOpen = !mobileMenuOpen">
+        <el-icon :size="20"><Operation /></el-icon>
+      </button>
       <router-view v-slot="{ Component, route }">
         <transition name="page" mode="out-in">
           <component :is="Component" :key="route.path" />
@@ -74,7 +85,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   ChatDotRound,
@@ -83,12 +94,19 @@ import {
   DataLine,
   Cpu,
   Setting,
+  Operation,
 } from '@element-plus/icons-vue'
 import ThemeToggle from '@/components/common/ThemeToggle.vue'
 
 const route = useRoute()
-const isCollapsed = ref(false)
+const isCollapsed = ref(localStorage.getItem('sidebar-collapsed') === 'true')
 const showSettings = ref(false)
+const mobileMenuOpen = ref(false)
+
+// 监听折叠状态变化并持久化
+watch(isCollapsed, (val) => {
+  localStorage.setItem('sidebar-collapsed', String(val))
+})
 
 // 菜单项配置
 const menuItems = [
@@ -304,8 +322,49 @@ const isActive = (path: string) => {
   color: var(--color-text-primary);
 }
 
+/* ── 移动端菜单按钮 ── */
+.app-mobile-menu-btn {
+  display: none;
+  position: fixed;
+  top: var(--space-3);
+  left: var(--space-3);
+  z-index: var(--z-sticky);
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-fast);
+}
+
+.app-mobile-menu-btn:hover {
+  background-color: var(--color-bg-tertiary);
+}
+
+/* ── 移动端遮罩层 ── */
+.mobile-overlay {
+  display: none;
+}
+
 /* ── 响应式设计 ── */
 @media (max-width: 768px) {
+  .app-mobile-menu-btn {
+    display: flex;
+  }
+
+  .mobile-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: var(--color-bg-overlay);
+    z-index: calc(var(--z-fixed) - 1);
+  }
+
   .app-sidebar {
     position: fixed;
     left: 0;

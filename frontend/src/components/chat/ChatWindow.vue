@@ -3,7 +3,7 @@
     <div v-if="messages.length === 0" class="empty-state">
       <el-empty description="开始新的对话吧">
         <template #image>
-          <div style="font-size: 64px; color: #c0c4cc">
+          <div style="font-size: 64px; color: var(--color-text-placeholder)">
             <el-icon><ChatDotRound /></el-icon>
           </div>
         </template>
@@ -15,6 +15,8 @@
         :key="msg.id"
         :message="msg"
         :is-streaming="isStreaming && index === messages.length - 1 && msg.role === 'assistant'"
+        :is-last="index === messages.length - 1 && msg.role === 'assistant'"
+        @regenerate="$emit('regenerate')"
       />
       <div v-if="isStreaming" class="typing-indicator">
         <span></span>
@@ -34,6 +36,10 @@ import MessageBubble from './MessageBubble.vue'
 const props = defineProps<{
   messages: ChatMessage[]
   isStreaming: boolean
+}>()
+
+defineEmits<{
+  regenerate: []
 }>()
 
 const chatContainer = ref<HTMLElement>()
@@ -88,7 +94,7 @@ watch(() => props.isStreaming, scrollToBottom)
 .typing-indicator span {
   width: 8px;
   height: 8px;
-  background: #409eff;
+  background: var(--color-primary);
   border-radius: 50%;
   animation: bounce 1.4s infinite ease-in-out;
 }

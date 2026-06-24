@@ -57,7 +57,7 @@ watch(
   height: 100%;
   display: flex;
   flex-direction: column;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--color-border);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -89,6 +89,15 @@ watch(
   color: #67c23a;
 }
 
+.empty-output {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #606266;
+  font-size: 13px;
+}
+
 .console-output {
   flex: 1;
   overflow-y: auto;
@@ -108,14 +117,5 @@ watch(
 
 .console-output pre.has-error {
   color: #f56c6c;
-}
-
-.empty-output {
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #606266;
-  font-size: 13px;
 }
 </style>

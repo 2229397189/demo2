@@ -35,7 +35,7 @@ const expanded = ref(false)
 <style scoped>
 .source-reference {
   margin-top: 8px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--color-border);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -45,15 +45,15 @@ const expanded = ref(false)
   align-items: center;
   gap: 6px;
   padding: 8px 12px;
-  background: #f5f7fa;
+  background: var(--color-bg-secondary);
   cursor: pointer;
   font-size: 13px;
-  color: #606266;
+  color: var(--color-text-secondary);
   user-select: none;
 }
 
 .source-header:hover {
-  background: #ecf5ff;
+  background: var(--color-primary-bg, #ecf5ff);
 }
 
 .expand-icon {
@@ -74,9 +74,9 @@ const expanded = ref(false)
 
 .source-item {
   padding: 10px;
-  background: #fafafa;
+  background: var(--color-bg-secondary);
   border-radius: 6px;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--color-border-light);
 }
 
 .source-info {
@@ -89,12 +89,12 @@ const expanded = ref(false)
 
 .chunk-index {
   font-size: 12px;
-  color: #909399;
+  color: var(--color-text-tertiary);
 }
 
 .source-content {
   font-size: 13px;
-  color: #606266;
+  color: var(--color-text-secondary);
   line-height: 1.5;
   max-height: 100px;
   overflow-y: auto;

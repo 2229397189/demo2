@@ -6,12 +6,13 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
+import org.springframework.beans.factory.annotation.Qualifier;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 
 /**
@@ -25,8 +26,8 @@ import java.util.stream.Collectors;
 @Service
 public class HybridRetrievalService {
 
-    /** 线程池用于并行检索 */
-    private final ExecutorService retrievalExecutor = Executors.newFixedThreadPool(4);
+    /** 线程池用于并行检索（由 Spring 管理） */
+    private final Executor retrievalExecutor;
 
     private final MilvusService milvusService;
     private final BM25Service bm25Service;
@@ -38,12 +39,14 @@ public class HybridRetrievalService {
                                   BM25Service bm25Service,
                                   GraphRetrievalService graphRetrievalService,
                                   RRFFusionService rrfFusionService,
-                                  EmbeddingService embeddingService) {
+                                  EmbeddingService embeddingService,
+                                  @Qualifier("retrievalExecutor") Executor retrievalExecutor) {
         this.milvusService = milvusService;
         this.bm25Service = bm25Service;
         this.graphRetrievalService = graphRetrievalService;
         this.rrfFusionService = rrfFusionService;
         this.embeddingService = embeddingService;
+        this.retrievalExecutor = retrievalExecutor;
     }
 
     // ──────────────────────────────────────────────────────────────

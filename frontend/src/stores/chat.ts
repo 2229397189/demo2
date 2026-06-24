@@ -37,6 +37,7 @@ export const useChatStore = defineStore('chat', () => {
   const streamWebResults = ref<SourceReference[]>([])
   const streamSandboxResults = ref<SandboxExecution[]>([])
   const thinkingSteps = ref<Array<{step: string, message: string}>>([])
+  let abortStream: (() => void) | null = null
 
   const sortedSessions = computed(() =>
     [...sessions.value].sort((a, b) =>
@@ -154,13 +155,14 @@ export const useChatStore = defineStore('chat', () => {
       messages.value = newMessages
     }
 
-    chatApi.streamChat(req, {
+    abortStream = chatApi.streamChat(req, {
       onMessage(chunk: string) {
         streamContent.value += chunk
         updateMessage()
       },
       onDone() {
         isStreaming.value = false
+        abortStream = null
         updateMessage()
         const session = sessions.value.find(s => s.id === currentSession.value?.id)
         if (session) {
@@ -170,6 +172,7 @@ export const useChatStore = defineStore('chat', () => {
       },
       onError(error: Error) {
         isStreaming.value = false
+        abortStream = null
         const newMessages = [...messages.value]
         newMessages[assistantIndex] = {
           ...newMessages[assistantIndex],
@@ -226,6 +229,24 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
+  function stopStreaming() {
+    if (abortStream) {
+      abortStream()
+      abortStream = null
+      isStreaming.value = false
+      // 标记消息为已中断
+      const lastMsg = messages.value[messages.value.length - 1]
+      if (lastMsg && lastMsg.role === 'assistant' && streamContent.value) {
+        const newMessages = [...messages.value]
+        newMessages[newMessages.length - 1] = {
+          ...lastMsg,
+          content: streamContent.value + '\n\n⏹ [已停止生成]',
+        }
+        messages.value = newMessages
+      }
+    }
+  }
+
   return {
     sessions,
     currentSession,
@@ -244,5 +265,6 @@ export const useChatStore = defineStore('chat', () => {
     selectSession,
     loadMessages,
     sendMessage,
+    stopStreaming,
   }
 })

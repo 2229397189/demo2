@@ -89,7 +89,7 @@ defineExpose({ getValue })
   width: 100%;
   height: 100%;
   min-height: 300px;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--color-border);
   border-radius: 4px;
   overflow: hidden;
 }

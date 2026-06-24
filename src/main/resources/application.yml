@@ -119,13 +119,13 @@ spring.elasticsearch:
   connection-timeout: 5000
   socket-timeout: 60000
 
-# Neo4j - DISABLED (set to true and configure credentials to enable)
+# Neo4j
 neo4j:
-  enabled: false
-  uri: bolt://localhost:7687
+  enabled: ${NEO4J_ENABLED:false}
+  uri: ${NEO4J_URI:bolt://localhost:7687}
   authentication:
-    username: neo4j
-    password: neo4j123456
+    username: ${NEO4J_USERNAME:neo4j}
+    password: ${NEO4J_PASSWORD:neo4j123456}
   max-connection-pool-size: 5
   connection-acquisition-timeout: 5
 

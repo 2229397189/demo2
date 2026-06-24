@@ -12,6 +12,9 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -292,21 +295,34 @@ public class MemoryConsolidation {
      * Apply importance decay to older memories.
      * Memories that haven't been accessed recently lose importance over time.
      * Memories below the minimum importance threshold are candidates for removal.
+     * <p>
+     * Uses paginated queries to avoid full table scan.
      */
     public void decayImportance() {
-        try {
-            List<Memory> allMemories = memoryMapper.selectList(null);
-            int decayed = 0;
+        int pageSize = 200;
+        int currentPage = 1;
+        int totalDecayed = 0;
 
-            for (Memory memory : allMemories) {
-                if (memory.getLastAccessedAt() == null) {
-                    continue;
+        try {
+            LocalDateTime cutoffDate = LocalDateTime.now()
+                    .minusDays(DEFAULT_IMPORTANCE_DECAY_DAYS);
+
+            boolean hasMore = true;
+            while (hasMore) {
+                // 分页查询：只查 lastAccessedAt < cutoff 的记录，避免全表扫描
+                Page<Memory> page = new Page<>(currentPage, pageSize);
+                LambdaQueryWrapper<Memory> query = new LambdaQueryWrapper<Memory>()
+                        .lt(Memory::getLastAccessedAt, cutoffDate)
+                        .isNotNull(Memory::getLastAccessedAt)
+                        .orderByAsc(Memory::getId);
+                Page<Memory> result = memoryMapper.selectPage(page, query);
+
+                List<Memory> records = result.getRecords();
+                if (records == null || records.isEmpty()) {
+                    break;
                 }
 
-                long daysSinceAccess = ChronoUnit.DAYS.between(
-                        memory.getLastAccessedAt(), LocalDateTime.now());
-
-                if (daysSinceAccess >= DEFAULT_IMPORTANCE_DECAY_DAYS) {
+                for (Memory memory : records) {
                     double currentImportance = memory.getImportance() != null
                             ? memory.getImportance() : 1.0;
                     double newImportance = currentImportance * DECAY_FACTOR;
@@ -319,12 +335,15 @@ public class MemoryConsolidation {
                         memory.setImportance(newImportance);
                         memory.setUpdatedAt(LocalDateTime.now());
                         memoryMapper.updateById(memory);
-                        decayed++;
+                        totalDecayed++;
                     }
                 }
+
+                hasMore = records.size() == pageSize;
+                currentPage++;
             }
 
-            log.info("Importance decay applied: {} memories updated", decayed);
+            log.info("Importance decay applied: {} memories updated", totalDecayed);
 
         } catch (Exception e) {
             log.error("Importance decay failed: {}", e.getMessage(), e);
@@ -342,8 +361,7 @@ public class MemoryConsolidation {
         }
 
         try {
-            com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Memory> query =
-                    new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Memory>()
+            LambdaQueryWrapper<Memory> query = new LambdaQueryWrapper<Memory>()
                             .eq(Memory::getUserId, userId);
             List<Memory> userMemories = memoryMapper.selectList(query);
             int decayed = 0;

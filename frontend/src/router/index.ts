@@ -32,6 +32,11 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/SandboxView.vue'),
     meta: { title: '代码沙箱' },
   },
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'NotFound',
+    redirect: '/',
+  },
 ]
 
 const router = createRouter({

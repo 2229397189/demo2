@@ -85,8 +85,8 @@ function formatTime(date: string) {
 }
 
 .memory-node {
-  background: #fff;
-  border: 1px solid #e4e7ed;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
   border-radius: 8px;
   padding: 12px;
   cursor: pointer;
@@ -94,7 +94,7 @@ function formatTime(date: string) {
 }
 
 .memory-node:hover {
-  border-color: #409eff;
+  border-color: var(--color-primary);
   box-shadow: 0 2px 8px rgba(64, 158, 255, 0.15);
 }
 
@@ -110,12 +110,12 @@ function formatTime(date: string) {
   align-items: center;
   gap: 4px;
   font-size: 12px;
-  color: #e6a23c;
+  color: var(--color-warning);
 }
 
 .node-content {
   font-size: 14px;
-  color: #303133;
+  color: var(--color-text-primary);
   line-height: 1.5;
   margin-bottom: 8px;
   display: -webkit-box;
@@ -126,6 +126,6 @@ function formatTime(date: string) {
 
 .node-meta {
   font-size: 11px;
-  color: #909399;
+  color: var(--color-text-tertiary);
 }
 </style>

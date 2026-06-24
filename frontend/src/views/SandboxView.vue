@@ -332,12 +332,12 @@ function formatMemory(bytes: number) {
 .page-header h2 {
   margin: 0 0 8px;
   font-size: 24px;
-  color: #303133;
+  color: var(--color-text-primary);
 }
 
 .page-header p {
   margin: 0;
-  color: #909399;
+  color: var(--color-text-tertiary);
   font-size: 14px;
 }
 
@@ -358,7 +358,7 @@ function formatMemory(bytes: number) {
   flex: 1;
   display: flex;
   flex-direction: column;
-  border: 1px solid #e4e7ed;
+  border: 1px solid var(--color-border);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -368,8 +368,8 @@ function formatMemory(bytes: number) {
   align-items: center;
   justify-content: space-between;
   padding: 8px 16px;
-  background: #f5f7fa;
-  border-bottom: 1px solid #e4e7ed;
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border);
   font-size: 14px;
   font-weight: 500;
 }
@@ -393,16 +393,16 @@ function formatMemory(bytes: number) {
 
 .info-item label {
   font-size: 12px;
-  color: #909399;
+  color: var(--color-text-tertiary);
 }
 
 .info-item span {
   font-size: 14px;
-  color: #303133;
+  color: var(--color-text-primary);
   font-weight: 500;
 }
 
 .exit-error {
-  color: #f56c6c;
+  color: var(--color-danger);
 }
 </style>

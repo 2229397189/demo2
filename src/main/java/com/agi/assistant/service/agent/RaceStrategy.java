@@ -13,13 +13,14 @@ import org.springframework.web.reactive.function.client.WebClient;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
+import org.springframework.beans.factory.annotation.Qualifier;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -35,15 +36,15 @@ public class RaceStrategy {
 
     private static final long DEFAULT_TIMEOUT_SECONDS = 30;
 
-    private final ExecutorService raceExecutor;
+    private final Executor raceExecutor;
     private final HybridRetrievalService hybridRetrievalService;
     private final WebClient openAiWebClient;
     private final ObjectMapper objectMapper;
 
     public RaceStrategy(HybridRetrievalService hybridRetrievalService,
-                        WebClient openAiWebClient) {
-        this.raceExecutor = Executors.newFixedThreadPool(
-                Runtime.getRuntime().availableProcessors() * 2);
+                        WebClient openAiWebClient,
+                        @Qualifier("raceExecutor") Executor raceExecutor) {
+        this.raceExecutor = raceExecutor;
         this.hybridRetrievalService = hybridRetrievalService;
         this.openAiWebClient = openAiWebClient;
         this.objectMapper = new ObjectMapper();
