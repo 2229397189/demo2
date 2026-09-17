@@ -5,6 +5,7 @@ import com.agi.assistant.model.entity.Document;
 import com.agi.assistant.model.vo.PageResult;
 import com.agi.assistant.model.vo.Result;
 import com.agi.assistant.service.DocumentService;
+import com.agi.assistant.service.security.AccessDeniedException;
 import com.agi.assistant.service.security.UserContext;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -53,15 +54,17 @@ public class DocumentController {
     }
 
     @GetMapping("/{id}")
-    @Operation(summary = "文档详情", description = "获取指定文档的详细信息")
+    @Operation(summary = "文档详情", description = "获取指定文档的详细信息；仅允许访问当前登录用户的文档")
     public Result<Document> getDocument(
             @Parameter(description = "文档ID") @PathVariable("id") String documentId) {
+        Long userId = UserContext.requireUserId();
         Long id = parseId(documentId);
         if (id == null) {
             return Result.fail(400, "Invalid document ID: " + documentId);
         }
-        log.info("Get document {}", id);
+        log.info("Get document {} by user {}", id, userId);
         Document document = documentService.getDocument(id);
+        checkOwnership(document, userId);
         return Result.ok(document);
     }
 
@@ -100,6 +103,25 @@ public class DocumentController {
             return Long.parseLong(idStr);
         } catch (NumberFormatException e) {
             return null;
+        }
+    }
+
+    /**
+     * 校验文档是否属于当前登录用户（IDOR 防护）。
+     * <p>
+     * 不一致时抛 {@link AccessDeniedException} → HTTP 403，而不是静默返回别人的数据
+     * （那样 HTTP 状态码仍是 200，越权在监控侧不可见）。与 {@code MemoryController.checkOwnership}
+     * 保持同一套做法。
+     *
+     * @param document       已加载的文档
+     * @param currentUserId  当前登录用户
+     */
+    private void checkOwnership(Document document, Long currentUserId) {
+        if (document != null && document.getUserId() != null
+                && !document.getUserId().equals(currentUserId)) {
+            log.warn("越权访问文档被拒: 当前用户={}, 文档归属={}, docId={}",
+                    currentUserId, document.getUserId(), document.getId());
+            throw new AccessDeniedException("无权访问其他用户的文档");
         }
     }
 }

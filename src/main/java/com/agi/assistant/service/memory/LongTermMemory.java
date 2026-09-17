@@ -3,7 +3,7 @@ package com.agi.assistant.service.memory;
 import com.agi.assistant.mapper.MemoryMapper;
 import com.agi.assistant.model.entity.Memory;
 import com.agi.assistant.model.entity.SearchResult;
-import com.agi.assistant.model.enums.MemoryType;
+import com.agi.assistant.model.enums.MemoryCategory;
 import com.agi.assistant.service.rag.EmbeddingService;
 import com.agi.assistant.service.rag.MilvusService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -58,7 +58,8 @@ public class LongTermMemory {
      *
      * @param userId  the user identifier
      * @param content the memory content text
-     * @param type    the memory type (e.g. "preference", "knowledge", "fact")
+     * @param type    语义类别（会被 {@link MemoryCategory#normalize(String)} 归一为
+     *                FACT/PREFERENCE/KNOWLEDGE/HABIT/SUMMARY 之一，大小写不敏感）
      * @return the saved memory entity, or null if duplicate detected
      */
     public Memory saveMemory(Long userId, String content, String type) {
@@ -117,7 +118,9 @@ public class LongTermMemory {
         Memory memory = new Memory();
         memory.setUserId(userId);
         memory.setContent(content);
-        memory.setType(type != null ? type : MemoryType.LONG_TERM.name());
+        // memory.type 存的是「语义类别」，统一归一为大写规范 token（FACT/PREFERENCE/...）。
+        // 历史小写 / 未知取值经 normalize 收敛，保证写入口径唯一。
+        memory.setType(MemoryCategory.normalize(type));
         memory.setImportance(importance != null ? importance : 1.0);
         memory.setAccessCount(0);
         memory.setLastAccessedAt(LocalDateTime.now());

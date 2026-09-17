@@ -26,6 +26,7 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -53,6 +54,14 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class DocumentServiceImpl implements DocumentService {
 
+    /**
+     * 允许进入处理流程的状态：只有 PENDING（新上传）与 FAILED（重试）可以。
+     * PROCESSING / COMPLETED / PARTIAL 一律视为「正在处理或已有结果」，跳过以保证幂等。
+     */
+    private static final List<Integer> PROCESSABLE_STATUSES = List.of(
+            DocumentStatus.PENDING.getCode(),
+            DocumentStatus.FAILED.getCode());
+
     private final DocumentMapper documentMapper;
     private final DocumentChunkMapper documentChunkMapper;
 
@@ -67,6 +76,17 @@ public class DocumentServiceImpl implements DocumentService {
 
     @Value("${app.upload.dir:./uploads}")
     private String uploadDir;
+
+    /**
+     * 自身代理（带 {@code @Lazy} 打破自引用循环）。
+     * <p>
+     * 上传成功后需要「异步触发处理」，但 {@link #processDocument(Long)} 是 {@code @Async} 方法：
+     * 同类内部直接调用会绕过 Spring 代理，{@code @Async} 失效退化为同步执行。通过自身代理调用，
+     * 才能保证处理真正跑在异步线程池上。
+     */
+    @Lazy
+    @Autowired
+    private DocumentService selfProxy;
 
     // ----------------------------------------------------------------
     //  Upload
@@ -105,11 +125,49 @@ public class DocumentServiceImpl implements DocumentService {
             documentMapper.insert(document);
             log.info("Document saved: id={}, path={}", document.getId(), filePath);
 
+            // 上传即入队处理：旧实现只落盘 + insert，不触发处理，文档会永久停在 PENDING，
+            // 用户的「上传 → 检索」默认流程因此是断的（必须再手动调 /process）。
+            // 这里通过自身代理异步触发一次处理；上传本身不等待处理结果（处理失败是异步的，
+            // 不会让上传接口报错），返回的文档 status=PENDING 表示「处理已排队」。
+            triggerProcessingAsync(document.getId());
+
             return document;
 
         } catch (IOException e) {
             log.error("Failed to save uploaded file: {}", e.getMessage(), e);
             throw new RuntimeException("Failed to save file", e);
+        }
+    }
+
+    /**
+     * 异步触发文档处理。处理提交失败（线程池拒绝等）时把文档置为 FAILED 并记录原因，
+     * 避免文档永远停在 PENDING。
+     *
+     * @param documentId 文档 ID
+     */
+    private void triggerProcessingAsync(Long documentId) {
+        try {
+            if (selfProxy != null) {
+                selfProxy.processDocument(documentId);
+            } else {
+                // 非 Spring 上下文（例如纯单元测试）下拿不到代理，退化为同步调用：
+                // 语义仍正确，只是失去异步性。
+                log.warn("selfProxy 不可用，文档 [{}] 同步触发处理", documentId);
+                processDocument(documentId);
+            }
+        } catch (Exception e) {
+            // 异步提交被拒绝 / 抛异常：明确置 FAILED，绝不静默（否则文档卡在 PENDING）
+            log.error("Document [{}] processing submission failed: {}", documentId, e.getMessage(), e);
+            try {
+                documentMapper.update(null, new LambdaUpdateWrapper<Document>()
+                        .eq(Document::getId, documentId)
+                        .set(Document::getStatus, DocumentStatus.FAILED.getCode())
+                        .set(Document::getErrorMessage, "处理提交失败: " + e.getMessage())
+                        .set(Document::getUpdatedAt, LocalDateTime.now()));
+            } catch (Exception ex) {
+                log.error("Failed to mark document [{}] as FAILED after submission failure: {}",
+                        documentId, ex.getMessage(), ex);
+            }
         }
     }
 
@@ -185,18 +243,33 @@ public class DocumentServiceImpl implements DocumentService {
             return;
         }
 
-        // 索引结果统计：用于区分「全链路成功 / 部分成功 / 全链路失败」，
-        // 修复「索引失败只 warn 然后无条件上报 COMPLETED」的假成功。
+        // 幂等守卫（原子 CAS）：只允许 PENDING / FAILED 进入处理流程。
+        // 旧实现无条件处理，调用方「自动触发」之外再手动调一次 /process 就会重复
+        // 分块落库，产生重复 chunk。这里用条件更新保证只有一次调用能完成
+        // 「状态 → PROCESSING」的跃迁，其余调用受影响行数为 0，直接跳过。
+        int claimed = documentMapper.update(null, new LambdaUpdateWrapper<Document>()
+                .eq(Document::getId, id)
+                .in(Document::getStatus, PROCESSABLE_STATUSES)
+                .set(Document::getStatus, DocumentStatus.PROCESSING.getCode())
+                .set(Document::getUpdatedAt, LocalDateTime.now()));
+
+        if (claimed == 0) {
+            log.info("Document [{}] is not in a processable state (status={}), skip duplicate processing",
+                    id, document.getStatus());
+            return;
+        }
+
+        // 各路索引结果统计：用于区分「全链路成功 / 部分跳过或部分失败 / 关键步骤失败」。
+        // skippedPaths 统计「因组件未启用/不可用而跳过」：这类路径既不是成功也不是失败，
+        // 旧实现忽略它，导致本地只有 MySQL 时 ok=0、failed=0 → 被误判为 COMPLETED（假成功）。
         List<String> degradations = new ArrayList<>();
         int okPaths = 0;
         int failedPaths = 0;
+        int skippedPaths = 0;
         int chunkCount = 0;
 
         try {
-            // Update status to PROCESSING
-            document.setStatus(DocumentStatus.PROCESSING.getCode());
-            document.setUpdatedAt(LocalDateTime.now());
-            documentMapper.updateById(document);
+            // 状态已由上面的 CAS 更新为 PROCESSING，这里不再重复写库。
 
             // 1. Read file content based on file type
             Path filePath = Paths.get(document.getFilePath());
@@ -264,6 +337,7 @@ public class DocumentServiceImpl implements DocumentService {
 
             // 5.1 稠密向量（Milvus）
             if (!milvusService.isAvailable()) {
+                skippedPaths++;
                 degradations.add("Milvus 未启用，未建立向量索引");
             } else {
                 try {
@@ -287,6 +361,7 @@ public class DocumentServiceImpl implements DocumentService {
 
             // 5.2 稀疏关键词（Elasticsearch BM25）
             if (!bm25Service.isAvailable()) {
+                skippedPaths++;
                 degradations.add("Elasticsearch 不可用，未建立 BM25 索引");
             } else {
                 boolean sparseOk = true;
@@ -316,8 +391,10 @@ public class DocumentServiceImpl implements DocumentService {
 
             // 5.3 知识图谱（Neo4j）：实体抽取 + 建块节点 + MENTIONS 边
             if (!graphRetrievalService.isAvailable()) {
+                skippedPaths++;
                 degradations.add("Neo4j 未启用，未构建知识图谱");
             } else if (!graphRetrievalService.isExtractionEnabled()) {
+                skippedPaths++;
                 degradations.add("图谱构建已关闭（rag.graph-extraction.enabled=false）");
             } else {
                 try {
@@ -331,19 +408,15 @@ public class DocumentServiceImpl implements DocumentService {
                 }
             }
 
-            // 6. 依据各路径结果决定最终状态
-            DocumentStatus finalStatus;
-            if (failedPaths == 0) {
-                finalStatus = DocumentStatus.COMPLETED;
-            } else if (okPaths == 0) {
-                finalStatus = DocumentStatus.FAILED;
-            } else {
-                finalStatus = DocumentStatus.PARTIAL;
-            }
+            // 6. 依据各路径结果决定最终状态（决定「这份文档到底能不能被检索到」）
+            DocumentStatus finalStatus = decideFinalStatus(okPaths, failedPaths, skippedPaths);
 
-            updateDocumentResult(id, finalStatus, chunkCount, String.join("; ", degradations));
-            log.info("Document [{}] processing finished: status={}, chunks={}, okPaths={}, failedPaths={}, notes={}",
-                    id, finalStatus, chunkCount, okPaths, failedPaths, degradations);
+            // errorMessage 结构化保留：说明「哪些索引没建、为什么」，供前端展示排障。
+            String note = degradations.isEmpty() ? "" : "部分索引未建立: " + String.join("; ", degradations);
+            updateDocumentResult(id, finalStatus, chunkCount, note);
+            log.info("Document [{}] processing finished: status={}, chunks={}, okPaths={}, failedPaths={}, "
+                    + "skippedPaths={}, notes={}",
+                    id, finalStatus, chunkCount, okPaths, failedPaths, skippedPaths, degradations);
 
         } catch (Exception e) {
             log.error("Document [{}] processing failed: {}", id, e.getMessage(), e);
@@ -371,13 +444,40 @@ public class DocumentServiceImpl implements DocumentService {
     }
 
     /**
+     * 依据三路索引的结果决定文档终态（纯函数，便于单测）。
+     * <p>
+     * 语义（真实反映「这份文档能不能被检索到」）：
+     * <ul>
+     *   <li>三路都没有跳过、也没有失败 → {@link DocumentStatus#COMPLETED}（全索引建立）；</li>
+     *   <li>有索引「因组件未启用/不可用而跳过」，或部分失败 → {@link DocumentStatus#PARTIAL}
+     *       （<b>关键</b>：只要有跳过就不能叫 COMPLETED，这正是「假 COMPLETED」的修复点）；</li>
+     *   <li>三路都尝试过且全部失败（没有跳过）→ {@link DocumentStatus#FAILED}（无一路可用）。</li>
+     * </ul>
+     * 「关键步骤（解析 / 分块）真失败」由调用方的 try/catch 直接置 FAILED，不经过本方法。
+     *
+     * @param okPaths      成功建立的索引路数
+     * @param failedPaths  尝试后失败的索引路数
+     * @param skippedPaths 因组件未启用/不可用而跳过的索引路数
+     * @return 文档终态
+     */
+    static DocumentStatus decideFinalStatus(int okPaths, int failedPaths, int skippedPaths) {
+        if (failedPaths == 0 && skippedPaths == 0) {
+            return DocumentStatus.COMPLETED;
+        }
+        if (okPaths == 0 && failedPaths > 0) {
+            return DocumentStatus.FAILED;
+        }
+        return DocumentStatus.PARTIAL;
+    }
+
+    /**
      * 统一更新文档的处理结果。
      * <p>
      * 用显式 set() 而不是 updateById(entity)，这样空串也能写入（清掉上一次的错误说明），
      * 不依赖 MyBatis-Plus 的字段策略。若 error_message 列尚未迁移到旧库，
      * 自动降级为只更新状态，保证流水线本身不会因此失败。
      */
-    private void updateDocumentResult(Long id, DocumentStatus status, int chunkCount, String note) {
+    void updateDocumentResult(Long id, DocumentStatus status, int chunkCount, String note) {
         String raw = note == null ? "" : note;
         final String message = raw.length() > 1000 ? raw.substring(0, 1000) : raw;
 

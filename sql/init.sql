@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS `memory` (
     `id` BIGINT PRIMARY KEY AUTO_INCREMENT,
     `user_id` BIGINT NOT NULL,
     `content` TEXT NOT NULL,
-    `type` VARCHAR(32) NOT NULL COMMENT 'short_term/long_term/graph/runtime',
+    `type` VARCHAR(32) NOT NULL COMMENT 'FACT/PREFERENCE/KNOWLEDGE/HABIT/SUMMARY（语义类别，大写）',
     `importance` DOUBLE DEFAULT 0.5 COMMENT '重要性评分0-1',
     `access_count` INT DEFAULT 0,
     `last_accessed_at` DATETIME,

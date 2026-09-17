@@ -4,7 +4,7 @@ import com.agi.assistant.mapper.MemoryMapper;
 import com.agi.assistant.config.OpenAIConfig;
 import com.agi.assistant.model.entity.ChatMessage;
 import com.agi.assistant.model.entity.Memory;
-import com.agi.assistant.model.enums.MemoryType;
+import com.agi.assistant.model.enums.MemoryCategory;
 import com.agi.assistant.service.rag.MilvusService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -40,6 +40,14 @@ import java.util.stream.Collectors;
 @Service
 public class MemoryConsolidation {
 
+    /**
+     * 记忆语义类别的规范选项（由 {@link MemoryCategory} 提供的单一事实来源，避免散落字符串）。
+     * 形如 {@code FACT（用户明确陈述的客观事实） / PREFERENCE（...） / ...}。
+     */
+    private static final String TYPE_OPTIONS = MemoryCategory.tokens().stream()
+            .map(token -> token + "（" + MemoryCategory.valueOf(token).getDescription() + "）")
+            .collect(Collectors.joining(" / "));
+
     private static final String FACT_EXTRACTION_PROMPT =
             "请从以下对话中提取用户明确表达的偏好、习惯、知识和事实。\n\n" +
             "【重要规则】\n" +
@@ -49,7 +57,7 @@ public class MemoryConsolidation {
             "4. 区分「用户说的」和「AI说的」，只记录用户主动表达的内容\n\n" +
             "以 JSON 数组格式输出，每个元素包含：\n" +
             "- \"content\": 事实内容（必须是用户原话或明确表达的意思）\n" +
-            "- \"type\": 类型（preference / knowledge / fact / habit）\n" +
+            "- \"type\": 类型，**只能取以下 5 个大写值之一**：" + TYPE_OPTIONS + "\n" +
             "- \"importance\": 重要性（0.0-1.0）\n" +
             "- \"topic\": 该事实所属的话题，用于在知识图谱里聚类（如「求职方向」「编程语言偏好」）\n" +
             "- \"source\": 来源（user/ai，标记信息来源）\n\n" +
@@ -167,8 +175,18 @@ public class MemoryConsolidation {
 
             // 3. Extract facts from the new conversation segment
             String conversation = formatConversation(newMessages);
-            List<Map<String, Object>> extractedFacts = extractFacts(conversation);
+            ExtractionOutcome extraction = extractFactsDetailed(conversation);
 
+            // 抽取失败（LLM 不可用 / 响应无法解析 / 网络异常）时**绝不推进水位**：
+            // 旧实现只要走到这里就把水位推到最新，导致这批消息再也不会被重新抽取 = 永久丢失。
+            // 现在失败直接返回，水位保持不动，下一轮基于同一水位重试。
+            if (!extraction.success()) {
+                log.warn("Fact extraction failed for session [{}] ({}), keep watermark unchanged for retry",
+                        sessionId, extraction.error());
+                return;
+            }
+
+            List<Map<String, Object>> extractedFacts = extraction.facts();
             List<Map<String, Object>> deduplicated = Collections.emptyList();
             int saved = 0;
             if (!extractedFacts.isEmpty()) {
@@ -179,8 +197,8 @@ public class MemoryConsolidation {
                 saved = persistFacts(userId, deduplicated);
             }
 
-            // 6. 推进水位。即使这一批没抽出事实也要推进，
-            //    否则同一批消息下一轮又被送去 LLM。
+            // 6. 只有抽取**成功**才推进水位。注意「成功但没抽出事实」也算成功，需要推进
+            //    （否则同一批消息下一轮又被送去 LLM）；区别只在于「失败」不推进。
             shortTermMemory.setConsolidationWatermark(
                     sessionId, fingerprint(recentMessages.get(recentMessages.size() - 1)));
 
@@ -260,7 +278,7 @@ public class MemoryConsolidation {
             if (content == null || content.isBlank()) {
                 continue;
             }
-            String type = (String) fact.getOrDefault("type", "fact");
+            String type = (String) fact.getOrDefault("type", MemoryCategory.DEFAULT.name());
             double importance = fact.containsKey("importance")
                     ? ((Number) fact.get("importance")).doubleValue() : 0.5;
 
@@ -364,13 +382,33 @@ public class MemoryConsolidation {
 
     /**
      * Extract facts from a conversation using LLM.
+     * <p>
+     * 兼容入口：只返回事实列表，不暴露成功/失败。内部委托 {@link #extractFactsDetailed(String)}。
      *
      * @param conversation the formatted conversation text
      * @return list of extracted facts, each containing content, type, and importance
      */
     public List<Map<String, Object>> extractFacts(String conversation) {
+        return extractFactsDetailed(conversation).facts();
+    }
+
+    /**
+     * 抽取事实，并显式区分「成功」与「失败」。
+     * <p>
+     * 为什么需要区分：旧实现把「抽取失败」和「成功但没抽到事实」都表示成空列表，
+     * 调用方无法区分，只能一律推进水位 —— 于是抽取失败的那批消息被永久跳过（丢记忆）。
+     * 现在失败显式返回 {@code success=false} 的结果，调用方据此不推进水位。
+     * <p>
+     * 本方法为 {@link #consolidate(Long, String)} 的抽取入口，{@code protected} 以便离线单测
+     * 覆盖「失败不推进水位」。
+     *
+     * @param conversation the formatted conversation text
+     * @return 抽取结果（含是否成功、事实列表、失败原因）
+     */
+    protected ExtractionOutcome extractFactsDetailed(String conversation) {
         if (conversation == null || conversation.isBlank()) {
-            return Collections.emptyList();
+            // 没有可抽取的内容：视为成功但为空，可推进水位
+            return ExtractionOutcome.success(Collections.emptyList());
         }
 
         try {
@@ -393,7 +431,7 @@ public class MemoryConsolidation {
 
             if (responseStr == null) {
                 log.warn("LLM returned null response for fact extraction");
-                return Collections.emptyList();
+                return ExtractionOutcome.failure("LLM 返回空响应");
             }
 
             @SuppressWarnings("unchecked")
@@ -401,7 +439,7 @@ public class MemoryConsolidation {
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> choices = (List<Map<String, Object>>) response.get("choices");
             if (choices == null || choices.isEmpty()) {
-                return Collections.emptyList();
+                return ExtractionOutcome.failure("LLM 响应缺少 choices");
             }
 
             @SuppressWarnings("unchecked")
@@ -411,7 +449,7 @@ public class MemoryConsolidation {
             String jsonStr = extractJsonArray(content);
             if (jsonStr == null) {
                 log.warn("Failed to extract JSON array from LLM response");
-                return Collections.emptyList();
+                return ExtractionOutcome.failure("无法从 LLM 响应中解析 JSON 数组");
             }
 
             List<Map<String, Object>> facts = objectMapper.readValue(jsonStr,
@@ -427,11 +465,30 @@ public class MemoryConsolidation {
 
             log.debug("Extracted {} facts from conversation, {} from user",
                     facts.size(), userFacts.size());
-            return userFacts;
+            return ExtractionOutcome.success(userFacts);
 
         } catch (Exception e) {
             log.error("Fact extraction failed: {}", e.getMessage(), e);
-            return Collections.emptyList();
+            return ExtractionOutcome.failure(e.getMessage());
+        }
+    }
+
+    /**
+     * 事实抽取的结果：既携带事实列表，也携带「是否成功」这一关键信号。
+     *
+     * @param success 抽取是否成功（false 时调用方不得推进记忆整合水位）
+     * @param facts   抽取到的事实（失败时为空列表）
+     * @param error   失败原因（成功时为 null）
+     */
+    record ExtractionOutcome(boolean success, List<Map<String, Object>> facts, String error) {
+
+        static ExtractionOutcome success(List<Map<String, Object>> facts) {
+            return new ExtractionOutcome(
+                    true, facts == null ? Collections.emptyList() : facts, null);
+        }
+
+        static ExtractionOutcome failure(String error) {
+            return new ExtractionOutcome(false, Collections.emptyList(), error);
         }
     }
 

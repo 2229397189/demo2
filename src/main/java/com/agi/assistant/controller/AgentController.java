@@ -9,6 +9,7 @@ import com.agi.assistant.service.agent.DAGScheduler;
 import com.agi.assistant.service.agent.TaskDAG;
 import com.agi.assistant.service.agent.ToolRegistry;
 import com.agi.assistant.service.harness.HarnessRuntime;
+import com.agi.assistant.service.security.AuthenticationException;
 import com.agi.assistant.service.security.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import io.swagger.v3.oas.annotations.Operation;
@@ -78,8 +79,16 @@ public class AgentController {
     @Operation(summary = "执行工具", description = "按名称调用工具，参数为 JSON 对象；风险分级与审计在注册表内统一处理")
     public Result<Map<String, Object>> executeTool(
             @PathVariable("name") String name,
-            @RequestBody(required = false) Map<String, Object> params,
-            @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId) {
+            @RequestBody(required = false) Map<String, Object> params) {
+
+        // 身份只能来自服务端认证上下文，绝不信任客户端请求头。
+        // 旧实现在这里用 @RequestHeader("X-User-Id") 且 default=1 —— 任何人只要带一个
+        // X-User-Id 头就能冒充任意用户执行工具、并把行为记到别人名下（审计污染 + 越权）。
+        // 未认证直接 401，而不是回退到某个默认用户。
+        Long userId = UserContext.getUserId();
+        if (userId == null) {
+            throw new AuthenticationException("未登录");
+        }
 
         if (!toolRegistry.hasTool(name)) {
             return Result.fail(404, "工具不存在: " + name);

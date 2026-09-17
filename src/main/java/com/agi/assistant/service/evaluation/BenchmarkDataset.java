@@ -202,7 +202,8 @@ public class BenchmarkDataset {
     /**
      * 从已上传文档构建数据集（供前端「从文档导入」使用）。
      * <p>
-     * 查询已完成（status = {@link DocumentStatus#COMPLETED}，即 2）的文档，
+     * 查询可用于评测的文档（status ∈ {@link DocumentStatus#COMPLETED} 与
+     * {@link DocumentStatus#PARTIAL}，二者至少有一部分内容可用），
      * 为每篇文档生成一条 golden query：
      * <ul>
      *   <li>query：使用文档标题</li>
@@ -223,16 +224,19 @@ public class BenchmarkDataset {
             limit = 4;
         }
 
-        // 只取真正处理完成的文档：COMPLETED = 2。
-        // 注意 PENDING=0 / PROCESSING=1 / FAILED=3 / PARTIAL=4 都不是「可用于评测」的状态。
+        // 取可用于评测的文档：COMPLETED（全链路成功）与 PARTIAL（分块已落库、部分索引成功），
+        // 二者至少有一部分内容可用；明确排除 PENDING(0) / PROCESSING(1) / FAILED(3)。
+        List<Integer> usableStatuses = List.of(
+                DocumentStatus.COMPLETED.getCode(),
+                DocumentStatus.PARTIAL.getCode());
         List<Document> docs = documentMapper.selectList(
                 new LambdaQueryWrapper<Document>()
-                        .eq(Document::getStatus, DocumentStatus.COMPLETED.getCode())
+                        .in(Document::getStatus, usableStatuses)
                         .orderByDesc(Document::getCreatedAt)
                         .last("LIMIT " + limit));
 
         if (docs.isEmpty()) {
-            log.warn("没有已完成(status=1)的文档可用于构建数据集 [{}]", datasetId);
+            log.warn("没有可用于构建数据集的文档（status ∈ {{COMPLETED, PARTIAL}}） dataset [{}]", datasetId);
             return 0;
         }
 

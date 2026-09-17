@@ -30,12 +30,26 @@ public interface EvaluationService {
     List<EvaluationTask> listTasks(Long userId);
 
     /**
-     * 获取评测任务的结果列表
+     * 获取评测任务的结果列表。
+     * <p>
+     * 会校验任务归属：{@code userId} 与任务所有者不一致时抛
+     * {@code AccessDeniedException}（HTTP 403），既不返回别人的数据也不静默返回空。
+     *
+     * @param taskId 任务 ID
+     * @param userId 当前登录用户
+     * @return 结果列表
      */
-    List<EvaluationResult> getTaskResults(Long taskId);
+    List<EvaluationResult> getTaskResults(Long taskId, Long userId);
 
     /**
-     * 对比两个评测任务的结果
+     * 对比两个评测任务的结果。
+     * <p>
+     * 两个任务都必须属于 {@code userId}，否则抛 {@code AccessDeniedException}。
+     *
+     * @param taskAId 任务 A 的 ID
+     * @param taskBId 任务 B 的 ID
+     * @param userId  当前登录用户
+     * @return 对比结果
      */
-    Map<String, Object> compareResults(Long taskAId, Long taskBId);
+    Map<String, Object> compareResults(Long taskAId, Long taskBId, Long userId);
 }

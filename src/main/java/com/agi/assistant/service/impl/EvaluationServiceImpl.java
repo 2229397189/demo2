@@ -9,6 +9,7 @@ import com.agi.assistant.model.enums.EvaluationStatus;
 import com.agi.assistant.service.EvaluationService;
 import com.agi.assistant.service.evaluation.EvaluationMetricsAggregator;
 import com.agi.assistant.service.evaluation.EvaluationRunner;
+import com.agi.assistant.service.security.AccessDeniedException;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -82,8 +83,19 @@ public class EvaluationServiceImpl implements EvaluationService {
         task.setUpdatedAt(LocalDateTime.now());
         evaluationTaskMapper.updateById(task);
 
-        // 通过独立的 EvaluationRunner bean 异步执行，避免自调用导致 @Async 失效
-        evaluationRunner.runEvaluation(task.getId());
+        // 通过独立的 EvaluationRunner bean 异步执行，避免自调用导致 @Async 失效。
+        // 关键：@Async 提交到线程池是在调用点「同步」发生的 —— 当线程池队列满被拒绝时，
+        // 这里会抛 TaskRejectedException（继承自 RejectedExecutionException）。旧实现没接住，
+        // 任务就永远停在 RUNNING、既不会 FAILED 也不会 COMPLETED。现在接住并置 FAILED + 记原因。
+        try {
+            evaluationRunner.runEvaluation(task.getId());
+        } catch (Exception e) {
+            log.error("评测任务 [{}] 异步提交被拒绝，置为 FAILED：{}", taskId, e.getMessage(), e);
+            task.setStatus(EvaluationStatus.FAILED.getCode());
+            task.setUpdatedAt(LocalDateTime.now());
+            evaluationTaskMapper.updateById(task);
+            throw new RuntimeException("评测任务异步提交被拒绝: " + e.getMessage(), e);
+        }
 
         // 重新读取最新状态（此时应已置为 RUNNING）后返回
         return evaluationTaskMapper.selectById(taskId);
@@ -98,11 +110,9 @@ public class EvaluationServiceImpl implements EvaluationService {
     }
 
     @Override
-    public List<EvaluationResult> getTaskResults(Long taskId) {
-        return evaluationResultMapper.selectList(
-                new LambdaQueryWrapper<EvaluationResult>()
-                        .eq(EvaluationResult::getTaskId, taskId)
-                        .orderByAsc(EvaluationResult::getId));
+    public List<EvaluationResult> getTaskResults(Long taskId, Long userId) {
+        checkTaskOwnership(taskId, userId);
+        return loadResults(taskId);
     }
 
     // ----------------------------------------------------------------
@@ -110,16 +120,12 @@ public class EvaluationServiceImpl implements EvaluationService {
     // ----------------------------------------------------------------
 
     @Override
-    public Map<String, Object> compareResults(Long taskAId, Long taskBId) {
-        EvaluationTask taskA = evaluationTaskMapper.selectById(taskAId);
-        EvaluationTask taskB = evaluationTaskMapper.selectById(taskBId);
+    public Map<String, Object> compareResults(Long taskAId, Long taskBId, Long userId) {
+        EvaluationTask taskA = checkTaskOwnership(taskAId, userId);
+        EvaluationTask taskB = checkTaskOwnership(taskBId, userId);
 
-        if (taskA == null || taskB == null) {
-            throw new RuntimeException("Evaluation task not found");
-        }
-
-        List<EvaluationResult> resultsA = getTaskResults(taskAId);
-        List<EvaluationResult> resultsB = getTaskResults(taskBId);
+        List<EvaluationResult> resultsA = loadResults(taskAId);
+        List<EvaluationResult> resultsB = loadResults(taskBId);
 
         Map<String, Object> comparison = new LinkedHashMap<>();
         comparison.put("taskA", buildTaskSummary(taskA, resultsA));
@@ -127,6 +133,40 @@ public class EvaluationServiceImpl implements EvaluationService {
         comparison.put("metricsComparison", buildMetricsComparison(resultsA, resultsB));
 
         return comparison;
+    }
+
+    /**
+     * 按任务 ID 读取结果（不做归属校验，仅供已通过校验的内部调用复用）。
+     */
+    private List<EvaluationResult> loadResults(Long taskId) {
+        return evaluationResultMapper.selectList(
+                new LambdaQueryWrapper<EvaluationResult>()
+                        .eq(EvaluationResult::getTaskId, taskId)
+                        .orderByAsc(EvaluationResult::getId));
+    }
+
+    /**
+     * 加载任务并校验归属（IDOR 防护）。
+     * <p>
+     * 任务不存在 → RuntimeException；任务不属于 {@code userId} → {@link AccessDeniedException}
+     * （HTTP 403）。越权时明确拒绝，绝不返回别人的数据、也不静默返回空。做法与
+     * {@code MemoryController.checkOwnership} 一致。
+     *
+     * @param taskId 任务 ID
+     * @param userId 当前登录用户
+     * @return 已通过归属校验的任务
+     */
+    private EvaluationTask checkTaskOwnership(Long taskId, Long userId) {
+        EvaluationTask task = evaluationTaskMapper.selectById(taskId);
+        if (task == null) {
+            throw new RuntimeException("评测任务不存在: " + taskId);
+        }
+        if (userId == null || !userId.equals(task.getUserId())) {
+            log.warn("越权访问评测任务被拒: 当前用户={}, 任务归属={}, taskId={}",
+                    userId, task.getUserId(), taskId);
+            throw new AccessDeniedException("无权访问其他用户的评测任务");
+        }
+        return task;
     }
 
     // ----------------------------------------------------------------

@@ -61,11 +61,12 @@ public class EvaluationController {
     }
 
     @GetMapping("/tasks/{taskId}/results")
-    @Operation(summary = "评测结果", description = "获取指定评测任务的结果列表")
+    @Operation(summary = "评测结果", description = "获取指定评测任务的结果列表；仅允许访问当前登录用户的任务")
     public Result<List<EvaluationResult>> getTaskResults(
             @Parameter(description = "任务ID") @PathVariable("taskId") Long taskId) {
-        log.info("Get results for evaluation task {}", taskId);
-        List<EvaluationResult> results = evaluationService.getTaskResults(taskId);
+        Long userId = UserContext.requireUserId();
+        log.info("Get results for evaluation task {} by user {}", taskId, userId);
+        List<EvaluationResult> results = evaluationService.getTaskResults(taskId, userId);
         return Result.ok(results);
     }
 
@@ -130,12 +131,13 @@ public class EvaluationController {
     }
 
     @GetMapping("/compare")
-    @Operation(summary = "对比评测结果", description = "对比两个评测任务的结果")
+    @Operation(summary = "对比评测结果", description = "对比两个评测任务的结果；两个任务都必须属于当前登录用户")
     public Result<Map<String, Object>> compareResults(
             @Parameter(description = "任务A的ID") @RequestParam("taskA") Long taskAId,
             @Parameter(description = "任务B的ID") @RequestParam("taskB") Long taskBId) {
-        log.info("Compare evaluation tasks {} and {}", taskAId, taskBId);
-        Map<String, Object> comparison = evaluationService.compareResults(taskAId, taskBId);
+        Long userId = UserContext.requireUserId();
+        log.info("Compare evaluation tasks {} and {} by user {}", taskAId, taskBId, userId);
+        Map<String, Object> comparison = evaluationService.compareResults(taskAId, taskBId, userId);
         return Result.ok(comparison);
     }
 }

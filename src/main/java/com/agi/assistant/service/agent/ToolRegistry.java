@@ -92,7 +92,9 @@ public class ToolRegistry {
                 .description(description != null ? description : "")
                 .riskLevel(riskLevel != null ? riskLevel : ToolRiskLevel.SAFE)
                 .handler(handler)
-                .status(ToolStatus.SUCCESS)
+                // 注册即「从未执行」：旧实现硬编码 SUCCESS，导致 GET /api/agent/tools
+                // 在一个工具一次都没跑过时就上报 SUCCESS（纯假状态）。
+                .status(ToolStatus.NOT_EXECUTED)
                 .build();
 
         tools.put(name.toLowerCase(), tool);
