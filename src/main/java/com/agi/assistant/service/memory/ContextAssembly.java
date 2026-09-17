@@ -159,47 +159,89 @@ public class ContextAssembly {
         // System instruction
         prompt.append("你是一个智能学习助手，能够根据用户的记忆和知识库提供个性化帮助。\n\n");
 
+        // 各记忆层拼装（复用与 ChatServiceImpl 相同的逻辑）
+        prompt.append(buildMemorySection(memories, true, true));
+
+        // Current query
+        prompt.append("## 当前问题\n");
+        prompt.append(query).append("\n");
+
+        return prompt.toString();
+    }
+
+    /**
+     * 只拼装「记忆 + 检索」段落，不含系统人设与当前问题。
+     * <p>
+     * 抽出来的原因：ChatServiceImpl 有自己的 system prompt 模板（{context}/{memory} 占位符）、
+     * 也有自己的一套检索结果，不能再套一份人设和问题；但 runtimeState / userProfile /
+     * graphMemoryChain / ragResults 这些上下文此前被 assembleContext 组装出来后无人消费，
+     * 等于白查了一遍数据库和向量库。这里给一个「只出段落」的入口，让两边共用同一套渲染。
+     *
+     * @param memories     assembleContext 的产物
+     * @param includeRag   是否渲染 ragResults（调用方若已有参考资料可传 false，避免重复列一遍）
+     * @param includeHistory 是否渲染最近对话（调用方若已把历史作为 messages 传入可传 false）
+     * @return 已渲染好的段落文本，可能为空串
+     */
+    @SuppressWarnings("unchecked")
+    public String buildMemorySection(Map<String, Object> memories, boolean includeRag, boolean includeHistory) {
+        StringBuilder prompt = new StringBuilder();
+        if (memories == null || memories.isEmpty()) {
+            return "";
+        }
+
         // Runtime state section (Planner + Tool + Task)
-        String runtimeState = (String) memories.getOrDefault("runtimeState", "");
-        if (!runtimeState.isEmpty()) {
+        Object runtimeStateRaw = memories.get("runtimeState");
+        if (runtimeStateRaw instanceof String runtimeState && !runtimeState.isEmpty()) {
             prompt.append(runtimeState);
         }
 
         // User profile section
-        Map<String, Object> userProfile = (Map<String, Object>) memories.getOrDefault("userProfile", Map.of());
-        if (!userProfile.isEmpty()) {
+        Object userProfileRaw = memories.get("userProfile");
+        if (userProfileRaw instanceof Map<?, ?> rawProfile && !rawProfile.isEmpty()) {
+            Map<String, Object> userProfile = (Map<String, Object>) rawProfile;
             prompt.append("## 用户画像\n");
-            if (userProfile.containsKey("totalMemories")) {
+            if (userProfile.get("totalMemories") != null) {
                 prompt.append("- 已积累记忆: ").append(userProfile.get("totalMemories")).append(" 条\n");
             }
-            Map<String, List<String>> byType = (Map<String, List<String>>) userProfile.getOrDefault("memoriesByType", Map.of());
-            for (Map.Entry<String, List<String>> entry : byType.entrySet()) {
-                prompt.append("- ").append(entry.getKey()).append(": ");
-                prompt.append(String.join("；", entry.getValue().stream()
-                        .limit(3).collect(Collectors.toList())));
-                prompt.append("\n");
+            Object byTypeRaw = userProfile.get("memoriesByType");
+            if (byTypeRaw instanceof Map<?, ?> rawByType) {
+                for (Map.Entry<?, ?> entry : rawByType.entrySet()) {
+                    if (!(entry.getValue() instanceof List<?> values) || values.isEmpty()) {
+                        continue;
+                    }
+                    List<String> limited = values.stream()
+                            .limit(3)
+                            .map(String::valueOf)
+                            .collect(Collectors.toList());
+                    prompt.append("- ").append(entry.getKey()).append(": ");
+                    prompt.append(String.join("；", limited));
+                    prompt.append("\n");
+                }
             }
             prompt.append("\n");
         }
 
         // Long-term memory recall
-        List<String> longTermRecall = (List<String>) memories.getOrDefault("longTermRecall", List.of());
-        if (!longTermRecall.isEmpty()) {
+        Object recallRaw = memories.get("longTermRecall");
+        if (recallRaw instanceof List<?> rawRecall && !rawRecall.isEmpty()) {
             prompt.append("## 相关记忆\n");
-            for (int i = 0; i < longTermRecall.size(); i++) {
-                prompt.append(i + 1).append(". ").append(longTermRecall.get(i)).append("\n");
+            for (int i = 0; i < rawRecall.size(); i++) {
+                prompt.append(i + 1).append(". ").append(rawRecall.get(i)).append("\n");
             }
             prompt.append("\n");
         }
 
         // Graph memory chain
-        List<Map<String, Object>> graphChain = (List<Map<String, Object>>) memories.getOrDefault("graphMemoryChain", List.of());
-        if (!graphChain.isEmpty()) {
+        Object graphRaw = memories.get("graphMemoryChain");
+        if (graphRaw instanceof List<?> rawGraph && !rawGraph.isEmpty()) {
             prompt.append("## 知识图谱关联\n");
-            for (Map<String, Object> item : graphChain) {
-                prompt.append("- ").append(item.get("content"));
-                if (item.containsKey("importance")) {
-                    prompt.append(" [重要性: ").append(item.get("importance")).append("]");
+            for (Object item : rawGraph) {
+                if (!(item instanceof Map<?, ?> node)) {
+                    continue;
+                }
+                prompt.append("- ").append(node.get("content"));
+                if (node.get("importance") != null) {
+                    prompt.append(" [重要性: ").append(node.get("importance")).append("]");
                 }
                 prompt.append("\n");
             }
@@ -207,35 +249,47 @@ public class ContextAssembly {
         }
 
         // RAG retrieved context
-        List<SearchResult> ragResults = (List<SearchResult>) memories.getOrDefault("ragResults", List.of());
-        if (!ragResults.isEmpty()) {
-            prompt.append("## 参考资料\n");
-            for (int i = 0; i < ragResults.size(); i++) {
-                SearchResult result = ragResults.get(i);
-                prompt.append("[").append(i + 1).append("] ");
-                if (result.getTitle() != null) {
-                    prompt.append(result.getTitle()).append(": ");
+        if (includeRag) {
+            Object ragRaw = memories.get("ragResults");
+            if (ragRaw instanceof List<?> rawRag && !rawRag.isEmpty()) {
+                prompt.append("## 参考资料\n");
+                int idx = 0;
+                for (Object item : rawRag) {
+                    if (!(item instanceof SearchResult result)) {
+                        continue;
+                    }
+                    idx++;
+                    prompt.append("[").append(idx).append("] ");
+                    if (result.getTitle() != null) {
+                        prompt.append(result.getTitle()).append(": ");
+                    }
+                    prompt.append(result.getContent());
+                    if (result.getSource() != null) {
+                        prompt.append(" (来源: ").append(result.getSource()).append(")");
+                    }
+                    prompt.append("\n");
                 }
-                prompt.append(result.getContent());
-                prompt.append(" (来源: ").append(result.getSource()).append(")\n");
+                if (idx > 0) {
+                    prompt.append("\n");
+                }
             }
-            prompt.append("\n");
         }
 
         // Recent conversation
-        List<ChatMessage> recentMessages = (List<ChatMessage>) memories.getOrDefault("shortTermMessages", List.of());
-        if (!recentMessages.isEmpty()) {
-            prompt.append("## 最近对话\n");
-            for (ChatMessage msg : recentMessages) {
-                prompt.append("[").append(msg.getRole()).append("] ");
-                prompt.append(msg.getContent()).append("\n");
+        if (includeHistory) {
+            Object historyRaw = memories.get("shortTermMessages");
+            if (historyRaw instanceof List<?> rawHistory && !rawHistory.isEmpty()) {
+                prompt.append("## 最近对话\n");
+                for (Object item : rawHistory) {
+                    if (!(item instanceof ChatMessage msg)) {
+                        continue;
+                    }
+                    prompt.append("[").append(msg.getRole()).append("] ");
+                    prompt.append(msg.getContent()).append("\n");
+                }
+                prompt.append("\n");
             }
-            prompt.append("\n");
         }
-
-        // Current query
-        prompt.append("## 当前问题\n");
-        prompt.append(query).append("\n");
 
         return prompt.toString();
     }

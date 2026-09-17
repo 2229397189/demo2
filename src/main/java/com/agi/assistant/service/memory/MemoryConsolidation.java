@@ -1,14 +1,17 @@
 package com.agi.assistant.service.memory;
 
 import com.agi.assistant.mapper.MemoryMapper;
+import com.agi.assistant.config.OpenAIConfig;
 import com.agi.assistant.model.entity.ChatMessage;
 import com.agi.assistant.model.entity.Memory;
 import com.agi.assistant.model.enums.MemoryType;
 import com.agi.assistant.service.rag.EmbeddingService;
+import com.agi.assistant.service.rag.MilvusService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
@@ -50,6 +53,7 @@ public class MemoryConsolidation {
             "- \"content\": 事实内容（必须是用户原话或明确表达的意思）\n" +
             "- \"type\": 类型（preference / knowledge / fact / habit）\n" +
             "- \"importance\": 重要性（0.0-1.0）\n" +
+            "- \"topic\": 该事实所属的话题，用于在知识图谱里聚类（如「求职方向」「编程语言偏好」）\n" +
             "- \"source\": 来源（user/ai，标记信息来源）\n\n" +
             "对话内容：\n";
 
@@ -63,22 +67,66 @@ public class MemoryConsolidation {
     private final GraphMemory graphMemory;
     private final EmbeddingService embeddingService;
     private final MemoryMapper memoryMapper;
+    private final MilvusService milvusService;
     private final WebClient openAiWebClient;
+    private final OpenAIConfig openAIConfig;
     private final ObjectMapper objectMapper;
+
+    /** 记忆事实抽取使用的模型；留空则复用主模型（openai.model） */
+    @Value("${app.memory.extraction-model:}")
+    private String extractionModel;
+
+    /** 事实抽取的最大输出 token 数 */
+    @Value("${app.memory.extraction-max-tokens:3000}")
+    private int extractionMaxTokens;
+
+    /** 新记忆的默认 TTL（天） */
+    @Value("${app.memory.ttl-days:180}")
+    private int ttlDays;
+
+    /** 低重要性记忆的 TTL（天），短于默认 TTL */
+    @Value("${app.memory.low-importance-ttl-days:30}")
+    private int lowImportanceTtlDays;
+
+    /** 重要性低于该阈值时使用短 TTL */
+    @Value("${app.memory.low-importance-threshold:0.5}")
+    private double lowImportanceThreshold;
+
+    /** 建立 SIMILAR_TO 图边的相似度阈值 */
+    @Value("${app.memory.similar-link-threshold:0.85}")
+    private double similarLinkThreshold;
 
     public MemoryConsolidation(ShortTermMemory shortTermMemory,
                                LongTermMemory longTermMemory,
                                GraphMemory graphMemory,
                                EmbeddingService embeddingService,
                                MemoryMapper memoryMapper,
-                               WebClient openAiWebClient) {
+                               MilvusService milvusService,
+                               WebClient openAiWebClient,
+                               OpenAIConfig openAIConfig) {
         this.shortTermMemory = shortTermMemory;
         this.longTermMemory = longTermMemory;
         this.graphMemory = graphMemory;
         this.embeddingService = embeddingService;
         this.memoryMapper = memoryMapper;
+        this.milvusService = milvusService;
         this.openAiWebClient = openAiWebClient;
+        this.openAIConfig = openAIConfig;
         this.objectMapper = new ObjectMapper();
+    }
+
+    /**
+     * 解析事实抽取使用的模型名。
+     * <p>
+     * 修复：此前这里硬编码成 "qwen-turbo"（阿里 DashScope 的模型名），
+     * 而 WebClient 的 base-url 指向智谱 GLM，导致每次抽取都因「模型不存在」失败，
+     * 记忆整合实际上从未成功写入过任何长期记忆。
+     */
+    private String resolveExtractionModel() {
+        if (extractionModel != null && !extractionModel.isBlank()) {
+            return extractionModel.trim();
+        }
+        return openAIConfig.getModel();
     }
 
     // ----------------------------------------------------------------
@@ -99,63 +147,223 @@ public class MemoryConsolidation {
      * @param sessionId the session identifier (used to retrieve short-term memories)
      */
     public void consolidate(Long userId, String sessionId) {
-        if (userId == null) {
+        if (userId == null || sessionId == null || sessionId.isBlank()) {
             return;
         }
 
         log.info("Starting memory consolidation for user [{}], session [{}]", userId, sessionId);
 
         try {
-            // 1. Get recent short-term messages using sessionId
+            // 1. 取近期消息
             List<ChatMessage> recentMessages = shortTermMemory.getRecentMessages(sessionId, 20);
             if (recentMessages.isEmpty()) {
                 log.debug("No recent messages for user [{}], skipping consolidation", userId);
                 return;
             }
 
-            // 2. Extract facts from conversation
-            String conversation = formatConversation(recentMessages);
-            List<Map<String, Object>> extractedFacts = extractFacts(conversation);
-            if (extractedFacts.isEmpty()) {
-                log.debug("No facts extracted for user [{}]", userId);
+            // 2. 增量过滤：只处理水位之后的新消息。
+            //    修复前每次对话结束都把最近 20 条重新送进 LLM 抽取，既烧 token 又反复命中同一批事实。
+            String watermark = shortTermMemory.getConsolidationWatermark(sessionId);
+            List<ChatMessage> newMessages = messagesAfterWatermark(recentMessages, watermark);
+            if (newMessages.isEmpty()) {
+                log.debug("No new messages since watermark for session [{}], skipping consolidation", sessionId);
                 return;
             }
 
-            // 3. Deduplicate
-            List<Map<String, Object>> deduplicated = deduplicate(userId, extractedFacts);
+            // 3. Extract facts from the new conversation segment
+            String conversation = formatConversation(newMessages);
+            List<Map<String, Object>> extractedFacts = extractFacts(conversation);
 
-            // 4. Save to long-term memory and graph
+            List<Map<String, Object>> deduplicated = Collections.emptyList();
             int saved = 0;
-            for (Map<String, Object> fact : deduplicated) {
-                String content = (String) fact.get("content");
-                String type = (String) fact.getOrDefault("type", "fact");
-                double importance = fact.containsKey("importance")
-                        ? ((Number) fact.get("importance")).doubleValue() : 0.5;
+            if (!extractedFacts.isEmpty()) {
+                // 4. Deduplicate
+                deduplicated = deduplicate(userId, extractedFacts);
 
-                Memory memory = longTermMemory.saveMemory(userId, content, type);
-                if (memory != null) {
-                    // Add to graph memory
-                    String memoryId = "mem_" + memory.getId();
-                    graphMemory.addMemoryNode(userId, memoryId, content, importance);
-
-                    // Link to topics if available
-                    if (fact.containsKey("topic")) {
-                        graphMemory.linkMemoryToTopic(memoryId, (String) fact.get("topic"));
-                    }
-
-                    saved++;
-                }
+                // 5. Save to long-term memory and graph (含 FOLLOWS / SIMILAR_TO 边)
+                saved = persistFacts(userId, deduplicated);
             }
 
-            // 5. Decay importance of old memories
+            // 6. 推进水位。即使这一批没抽出事实也要推进，
+            //    否则同一批消息下一轮又被送去 LLM。
+            shortTermMemory.setConsolidationWatermark(
+                    sessionId, fingerprint(recentMessages.get(recentMessages.size() - 1)));
+
+            // 7. Decay importance of this user's old memories
             decayImportance(userId);
 
-            log.info("Consolidation complete for user [{}]: extracted={}, deduplicated={}, saved={}",
-                    userId, extractedFacts.size(), deduplicated.size(), saved);
+            log.info("Consolidation complete for user [{}]: newMessages={}, extracted={}, deduplicated={}, saved={}",
+                    userId, newMessages.size(), extractedFacts.size(), deduplicated.size(), saved);
 
         } catch (Exception e) {
             log.error("Memory consolidation failed for user [{}]: {}", userId, e.getMessage(), e);
         }
+    }
+
+    /**
+     * 删除已过 TTL 的记忆（含向量库中的对应向量）。
+     *
+     * @return 实际删除条数
+     */
+    public int purgeExpired() {
+        int deleted = 0;
+        try {
+            LocalDateTime now = LocalDateTime.now();
+            while (true) {
+                List<Memory> expired = memoryMapper.selectList(new LambdaQueryWrapper<Memory>()
+                        .isNotNull(Memory::getExpiresAt)
+                        .lt(Memory::getExpiresAt, now)
+                        .orderByAsc(Memory::getId)
+                        .last("LIMIT 200"));
+                if (expired.isEmpty()) {
+                    break;
+                }
+
+                List<String> vectorIds = new ArrayList<>();
+                for (Memory memory : expired) {
+                    memoryMapper.deleteById(memory.getId());
+                    vectorIds.add("mem_" + memory.getId());
+                }
+
+                // 向量库删不动不影响 DB 侧清理，只记 warn（否则孤儿向量会被 recall 召回）
+                try {
+                    milvusService.deleteByIds(vectorIds);
+                } catch (Exception e) {
+                    log.warn("删除过期记忆向量失败（数据库记录已删除）: {}", e.getMessage());
+                }
+
+                deleted += expired.size();
+                if (expired.size() < 200) {
+                    break;
+                }
+            }
+
+            if (deleted > 0) {
+                log.info("Purged {} expired memories", deleted);
+            }
+        } catch (Exception e) {
+            log.error("Failed to purge expired memories: {}", e.getMessage(), e);
+        }
+        return deleted;
+    }
+
+    /**
+     * 落库一批事实：长期记忆 + 图谱节点 + 话题边 + 时间链边 + 相似边。
+     *
+     * @return 实际保存条数
+     */
+    private int persistFacts(Long userId, List<Map<String, Object>> facts) {
+        int saved = 0;
+
+        // 与上一轮整合的最后一条记忆串起来，保证 FOLLOWS 链跨会话连续
+        // （getMemoryChain 依赖 FOLLOWS，此前这条边从未被写入 → 记忆链恒为空）
+        String previousMemoryId = findLatestMemoryId(userId);
+
+        for (Map<String, Object> fact : facts) {
+            String content = (String) fact.get("content");
+            if (content == null || content.isBlank()) {
+                continue;
+            }
+            String type = (String) fact.getOrDefault("type", "fact");
+            double importance = fact.containsKey("importance")
+                    ? ((Number) fact.get("importance")).doubleValue() : 0.5;
+
+            Memory memory = longTermMemory.saveMemory(userId, content, type, importance, ttlFor(importance));
+            if (memory == null) {
+                // 命中去重（哈希或向量相似），跳过
+                continue;
+            }
+
+            String memoryId = "mem_" + memory.getId();
+            graphMemory.addMemoryNode(userId, memoryId, content, importance);
+
+            Object topic = fact.get("topic");
+            if (topic instanceof String topicName && !topicName.isBlank()) {
+                graphMemory.linkMemoryToTopic(memoryId, topicName);
+            }
+
+            if (previousMemoryId != null) {
+                graphMemory.linkMemorySequence(previousMemoryId, memoryId);
+            }
+            previousMemoryId = memoryId;
+
+            linkSimilar(userId, memoryId, content);
+
+            saved++;
+        }
+
+        return saved;
+    }
+
+    /**
+     * 与既有语义相近的记忆建立 SIMILAR_TO 边。
+     */
+    private void linkSimilar(Long userId, String memoryId, String content) {
+        try {
+            for (LongTermMemory.SimilarMemory similar
+                    : longTermMemory.findSimilar(userId, content, similarLinkThreshold, 5)) {
+                String otherId = "mem_" + similar.memory().getId();
+                if (otherId.equals(memoryId)) {
+                    continue;
+                }
+                graphMemory.linkSimilarMemories(memoryId, otherId, similar.score());
+            }
+        } catch (Exception e) {
+            log.debug("Failed to link similar memories for [{}]: {}", memoryId, e.getMessage());
+        }
+    }
+
+    /**
+     * 查找用户最近一条长期记忆的图节点 ID，用于接续 FOLLOWS 链。
+     */
+    private String findLatestMemoryId(Long userId) {
+        try {
+            Memory latest = memoryMapper.selectOne(new LambdaQueryWrapper<Memory>()
+                    .eq(Memory::getUserId, userId)
+                    .orderByDesc(Memory::getId)
+                    .last("LIMIT 1"));
+            return latest != null ? "mem_" + latest.getId() : null;
+        } catch (Exception e) {
+            log.debug("Failed to find latest memory for user [{}]: {}", userId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 按重要性计算过期时间：低重要性记忆用更短的 TTL；天数为 0 表示永不过期。
+     */
+    private LocalDateTime ttlFor(double importance) {
+        int days = importance < lowImportanceThreshold ? lowImportanceTtlDays : ttlDays;
+        return days <= 0 ? null : LocalDateTime.now().plusDays(days);
+    }
+
+    /**
+     * 截取水位之后的新消息。
+     * <p>
+     * 水位记录的是「上一条已整合消息的指纹」而不是条数 —— 因为 Redis 列表会被裁剪到
+     * 最近 20 条，用条数在水位越界后会永久失效。指纹找不到时退化为全量处理，
+     * 靠哈希去重兜底，不会重复落库。
+     */
+    private List<ChatMessage> messagesAfterWatermark(List<ChatMessage> messages, String watermark) {
+        if (watermark == null || watermark.isBlank()) {
+            return messages;
+        }
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            if (watermark.equals(fingerprint(messages.get(i)))) {
+                return new ArrayList<>(messages.subList(i + 1, messages.size()));
+            }
+        }
+        return messages;
+    }
+
+    /**
+     * 消息指纹：角色 + 时间 + 内容。
+     */
+    private String fingerprint(ChatMessage message) {
+        String raw = message.getRole() + "|"
+                + (message.getCreatedAt() != null ? message.getCreatedAt().toString() : "") + "|"
+                + (message.getContent() != null ? message.getContent() : "");
+        return DigestUtils.sha256Hex(raw).substring(0, 32);
     }
 
     /**
@@ -172,12 +380,13 @@ public class MemoryConsolidation {
         try {
             String prompt = FACT_EXTRACTION_PROMPT + conversation;
 
-            Map<String, Object> requestBody = Map.of(
-                    "model", "qwen-turbo",
-                    "messages", List.of(Map.of("role", "user", "content", prompt)),
-                    "temperature", 0.2,
-                    "max_tokens", 3000
-            );
+            Map<String, Object> requestBody = new java.util.HashMap<>();
+            requestBody.put("model", resolveExtractionModel());
+            requestBody.put("messages", List.of(Map.of("role", "user", "content", prompt)));
+            requestBody.put("temperature", 0.2);
+            requestBody.put("max_tokens", extractionMaxTokens);
+            // 事实抽取是结构化 JSON 输出，思维链只会白烧 token 并可能导致内容被截断
+            openAIConfig.applyThinking(requestBody);
 
             String responseStr = openAiWebClient.post()
                     .uri("/chat/completions")

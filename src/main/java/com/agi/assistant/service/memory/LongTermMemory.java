@@ -62,15 +62,32 @@ public class LongTermMemory {
      * @return the saved memory entity, or null if duplicate detected
      */
     public Memory saveMemory(Long userId, String content, String type) {
+        return saveMemory(userId, content, type, 1.0, null);
+    }
+
+    /**
+     * Save a memory item with an explicit importance score and TTL.
+     *
+     * @param userId     the user identifier
+     * @param content    the memory content text
+     * @param type       the memory type
+     * @param importance importance score (0.0 - 1.0)
+     * @param expiresAt  expiry time, or null for no expiry
+     * @return the saved memory entity, or null if duplicate detected
+     */
+    public Memory saveMemory(Long userId, String content, String type,
+                             Double importance, LocalDateTime expiresAt) {
         if (userId == null || content == null || content.isBlank()) {
             return null;
         }
 
-        // Hash-based deduplication
+        // 哈希去重。
+        // 注意：metadata 里除了 hash 还存了 source 字段，所以必须按 JSON 路径取值比较，
+        // 不能用「整串 metadata 相等」——那永远不会命中（历史 bug，去重形同虚设）。
         String contentHash = DigestUtils.sha256Hex(content.trim().toLowerCase());
         LambdaQueryWrapper<Memory> hashQuery = new LambdaQueryWrapper<Memory>()
                 .eq(Memory::getUserId, userId)
-                .eq(Memory::getMetadata, buildHashMetadata(contentHash));
+                .apply("JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.hash')) = {0}", contentHash);
         Long existingCount = memoryMapper.selectCount(hashQuery);
         if (existingCount != null && existingCount > 0) {
             log.debug("Duplicate memory detected via hash for user [{}]: hash={}", userId, contentHash);
@@ -98,10 +115,11 @@ public class LongTermMemory {
         memory.setUserId(userId);
         memory.setContent(content);
         memory.setType(type != null ? type : MemoryType.LONG_TERM.name());
-        memory.setImportance(1.0);
+        memory.setImportance(importance != null ? importance : 1.0);
         memory.setAccessCount(0);
         memory.setLastAccessedAt(LocalDateTime.now());
         memory.setMetadata(buildSaveMetadata(contentHash));
+        memory.setExpiresAt(expiresAt);
         memory.setCreatedAt(LocalDateTime.now());
         memory.setUpdatedAt(LocalDateTime.now());
 
@@ -110,6 +128,8 @@ public class LongTermMemory {
         // Store embedding in Milvus for future similarity retrieval
         if (!embedding.isEmpty()) {
             String milvusId = "mem_" + memory.getId();
+            memory.setEmbeddingId(milvusId);
+            memoryMapper.updateById(memory);
             milvusService.insertVectors(
                     List.of(milvusId),
                     List.of("user_" + userId),
@@ -119,9 +139,57 @@ public class LongTermMemory {
             );
         }
 
-        log.info("Saved long-term memory for user [{}]: type={}, contentLength={}",
-                userId, type, content.length());
+        log.info("Saved long-term memory for user [{}]: type={}, importance={}, contentLength={}",
+                userId, type, memory.getImportance(), content.length());
         return memory;
+    }
+
+    /**
+     * 找出与给定内容语义相近的既有记忆（用于建立 SIMILAR_TO 图边）。
+     * <p>
+     * 先走向量召回拿到相似内容，再按内容精确回查数据库拿到记忆 ID
+     * （向量库只存内容，不存业务主键）。
+     *
+     * @param userId    用户 ID
+     * @param content   目标内容
+     * @param threshold 相似度阈值
+     * @param topK      最多返回条数
+     * @return 相近的记忆及其相似度列表
+     */
+    public List<SimilarMemory> findSimilar(Long userId, String content, double threshold, int topK) {
+        if (userId == null || content == null || content.isBlank()) {
+            return Collections.emptyList();
+        }
+
+        List<Float> embedding = embeddingService.embed(content);
+        if (embedding.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        String filterExpr = "document_id == \"user_" + userId + "\"";
+        List<SearchResult> hits = milvusService.searchVectors(embedding, Math.max(1, topK), filterExpr);
+        if (hits.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<SimilarMemory> result = new ArrayList<>();
+        for (SearchResult hit : hits) {
+            if (hit.getScore() < threshold) {
+                continue;
+            }
+            String hitContent = hit.getContent();
+            if (hitContent == null || hitContent.isBlank() || hitContent.equals(content)) {
+                continue;
+            }
+            Memory matched = memoryMapper.selectOne(new LambdaQueryWrapper<Memory>()
+                    .eq(Memory::getUserId, userId)
+                    .eq(Memory::getContent, hitContent)
+                    .last("LIMIT 1"));
+            if (matched != null) {
+                result.add(new SimilarMemory(matched, hit.getScore()));
+            }
+        }
+        return result;
     }
 
     /**
@@ -216,10 +284,17 @@ public class LongTermMemory {
     // ----------------------------------------------------------------
 
     private void touchSimilarMemory(Long userId, String content) {
+        if (content == null || content.isBlank()) {
+            return;
+        }
         try {
+            // 用内容精确匹配 + LIMIT 1。
+            // 旧实现用 like(前 100 字符) 且没有 LIMIT，多条命中时 selectOne 会抛
+            // TooManyResultsException 被 catch 吞掉，等于「访问计数永不更新」。
             LambdaQueryWrapper<Memory> query = new LambdaQueryWrapper<Memory>()
                     .eq(Memory::getUserId, userId)
-                    .like(Memory::getContent, content.substring(0, Math.min(content.length(), 100)));
+                    .eq(Memory::getContent, content)
+                    .last("LIMIT 1");
             Memory existing = memoryMapper.selectOne(query);
             if (existing != null) {
                 existing.setAccessCount((existing.getAccessCount() != null ? existing.getAccessCount() : 0) + 1);
@@ -244,12 +319,14 @@ public class LongTermMemory {
                 .collect(Collectors.toList());
     }
 
-    private String buildHashMetadata(String hash) {
-        return "{\"hash\":\"" + hash + "\"}";
-    }
-
     private String buildSaveMetadata(String hash) {
         return "{\"hash\":\"" + hash + "\",\"source\":\"long_term_memory\"}";
+    }
+
+    /**
+     * 一条语义相近的既有记忆及其相似度。
+     */
+    public record SimilarMemory(Memory memory, double score) {
     }
 
 }

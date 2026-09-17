@@ -588,12 +588,18 @@ public class ChatServiceImpl implements ChatService {
         // 从模板文件加载基础提示词（带缓存）
         String template = loadSystemPromptTemplate();
 
+        // 合并两路检索结果：
+        // - searchResults：本方法调用方（ChatServiceImpl 主流程 + web search）拿到的
+        // - context.ragResults：ContextAssembly 自己走 HybridRetrievalService 拿到的
+        // 二者此前互不相识，ContextAssembly 那一路查完就被丢弃了（白烧一次向量+BM25 检索）。
+        List<SearchResult> merged = mergeSearchResults(searchResults, context);
+
         // 构建参考资料部分
         StringBuilder contextSection = new StringBuilder();
-        if (!searchResults.isEmpty()) {
+        if (!merged.isEmpty()) {
             contextSection.append("## 参考资料\n");
-            for (int i = 0; i < searchResults.size(); i++) {
-                SearchResult r = searchResults.get(i);
+            for (int i = 0; i < merged.size(); i++) {
+                SearchResult r = merged.get(i);
                 contextSection.append("[").append(i + 1).append("] ");
                 if (r.getTitle() != null) {
                     contextSection.append(r.getTitle()).append(": ");
@@ -602,23 +608,18 @@ public class ChatServiceImpl implements ChatService {
             }
         }
 
-        // 构建记忆部分
-        StringBuilder memorySection = new StringBuilder();
-        if (context.containsKey("longTermRecall")) {
-            @SuppressWarnings("unchecked")
-            List<String> recall = (List<String>) context.get("longTermRecall");
-            if (recall != null && !recall.isEmpty()) {
-                memorySection.append("## 相关记忆\n");
-                for (int i = 0; i < recall.size(); i++) {
-                    memorySection.append(i + 1).append(". ").append(recall.get(i)).append("\n");
-                }
-            }
-        }
+        // 构建记忆部分：交给 ContextAssembly 统一渲染，
+        // 覆盖 runtimeState（Planner/Tool/任务态）/ userProfile（用户画像）/
+        // longTermRecall（相关记忆）/ graphMemoryChain（知识图谱关联）。
+        // 修复前这里只读 longTermRecall 一个 key，其余三个组装完就没人用了。
+        // ragResults 传 false —— 上面已合并进 contextSection，避免重复列一遍；
+        // shortTermMessages 传 false —— 历史消息已由 buildMessages 作为多轮 messages 传入。
+        String memorySection = contextAssembly.buildMemorySection(context, false, false);
 
         // 替换模板中的占位符
         String prompt = template
                 .replace("{context}", contextSection.toString())
-                .replace("{memory}", memorySection.toString());
+                .replace("{memory}", memorySection);
 
         // 如果模板中没有占位符（旧模板兼容），直接拼接
         if (!template.contains("{context}") && !template.contains("{memory}")) {
@@ -626,10 +627,10 @@ public class ChatServiceImpl implements ChatService {
             if (contextSection.length() > 0) {
                 fallback.append("\n").append(contextSection);
             }
-            if (memorySection.length() > 0) {
+            if (!memorySection.isBlank()) {
                 fallback.append("\n").append(memorySection);
             }
-            if (!searchResults.isEmpty()) {
+            if (!merged.isEmpty()) {
                 fallback.append("\n如果用户要求你写代码，请直接写出完整的代码。");
                 fallback.append("代码会被自动在沙箱环境中执行并返回结果。\n");
             }
@@ -637,6 +638,44 @@ public class ChatServiceImpl implements ChatService {
         }
 
         return prompt;
+    }
+
+    /**
+     * 合并两路检索结果，按「标题 + 内容」去重，保留先出现的（本方法调用方的结果优先）。
+     */
+    private List<SearchResult> mergeSearchResults(List<SearchResult> primary,
+                                                  Map<String, Object> context) {
+        List<SearchResult> merged = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+
+        if (primary != null) {
+            for (SearchResult r : primary) {
+                if (r == null) {
+                    continue;
+                }
+                String key = (r.getTitle() == null ? "" : r.getTitle()) + "\u0000"
+                        + (r.getContent() == null ? "" : r.getContent());
+                if (seen.add(key)) {
+                    merged.add(r);
+                }
+            }
+        }
+
+        Object ragRaw = context == null ? null : context.get("ragResults");
+        if (ragRaw instanceof List<?> list) {
+            for (Object item : list) {
+                if (!(item instanceof SearchResult r)) {
+                    continue;
+                }
+                String key = (r.getTitle() == null ? "" : r.getTitle()) + "\u0000"
+                        + (r.getContent() == null ? "" : r.getContent());
+                if (seen.add(key)) {
+                    merged.add(r);
+                }
+            }
+        }
+
+        return merged;
     }
 
     /**

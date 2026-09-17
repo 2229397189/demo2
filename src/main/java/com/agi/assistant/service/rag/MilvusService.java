@@ -327,6 +327,11 @@ public class MilvusService {
         if (ids == null || ids.isEmpty()) {
             return;
         }
+        if (milvusClient == null) {
+            // 与 deleteVectors 的降级口径保持一致：未启用 Milvus 时静默跳过，不抛异常
+            log.debug("Milvus client not available, skipping delete by IDs");
+            return;
+        }
 
         try {
             String inClause = ids.stream()

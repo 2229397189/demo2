@@ -114,12 +114,13 @@ public class GraphRetrievalService {
         try {
             String prompt = ENTITY_EXTRACTION_PROMPT + text;
 
-            Map<String, Object> requestBody = Map.of(
-                    "model", openAIConfig.getModel(),
-                    "messages", List.of(Map.of("role", "user", "content", prompt)),
-                    "temperature", 0.1,
-                    "max_tokens", 2000
-            );
+            Map<String, Object> requestBody = new HashMap<>();
+            requestBody.put("model", openAIConfig.getModel());
+            requestBody.put("messages", List.of(Map.of("role", "user", "content", prompt)));
+            requestBody.put("temperature", 0.1);
+            requestBody.put("max_tokens", 2000);
+            // 关闭思维链：实体抽取是结构化输出任务，思维链会把 max_tokens 吃光导致 content 为空
+            openAIConfig.applyThinking(requestBody);
 
             String responseStr = llmWebClient.post()
                     .uri("/chat/completions")
