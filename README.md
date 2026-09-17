@@ -149,7 +149,7 @@ npm install
 npm run dev
 ```
 
-前端访问: http://localhost:5173
+前端访问: http://localhost:3000
 
 ## API接口
 

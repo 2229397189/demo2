@@ -92,6 +92,49 @@ public class SandboxRuntime {
         log.info("Sandbox Docker client initialized with host {}", this.dockerHost);
     }
 
+    /**
+     * 探测 Docker 守护进程是否可达（供启动能力矩阵复用）。
+     * <p>
+     * 只做一次<b>有界</b>的轻量 ping（最长等待 2 秒），不创建 / 启动任何容器。
+     * 任何异常（守护进程未启动、连接失败、超时等）都吞掉并返回 {@code false}，
+     * 绝不让探测失败拖慢或中断应用启动。
+     *
+     * @return 守护进程可达返回 {@code true}，否则 {@code false}
+     */
+    public boolean isAvailable() {
+        if (dockerClient == null) {
+            return false;
+        }
+        final boolean[] reachable = {false};
+        Thread probe = new Thread(() -> {
+            try {
+                dockerClient.pingCmd().exec();
+                reachable[0] = true;
+            } catch (Throwable ignored) {
+                // 守护进程未启动 / 连接失败 / 超时：一律视为不可用，不抛异常
+            }
+        }, "sandbox-docker-probe");
+        probe.setDaemon(true);
+        probe.start();
+        try {
+            probe.join(2000L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return reachable[0];
+    }
+
+    /**
+     * 返回实际生效的 Docker 宿主地址（已按平台解析，例如 Windows 上会转为 npipe）。
+     * <p>
+     * 供启动能力矩阵如实展示「实际连的地址」，而不是原始配置值。
+     *
+     * @return 解析后的 Docker 宿主地址
+     */
+    public String getDockerHost() {
+        return dockerHost;
+    }
+
     public SandboxExecuteResponse executeCode(String language, String code, int timeout) {
         long actualTimeout = timeout > 0 ? timeout : defaultTimeoutSeconds;
         String containerId = null;
