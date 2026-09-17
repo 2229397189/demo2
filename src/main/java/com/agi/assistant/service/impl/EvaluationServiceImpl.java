@@ -17,10 +17,12 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
 
 /**
  * EvaluationService implementation.
@@ -161,99 +163,135 @@ public class EvaluationServiceImpl implements EvaluationService {
                                                         List<EvaluationResult> resultsB) {
         Map<String, Object> comparison = new LinkedHashMap<>();
 
-        // Average retrieval metrics
-        Map<String, Double> avgA = computeAverageRetrievalMetrics(resultsA);
-        Map<String, Double> avgB = computeAverageRetrievalMetrics(resultsB);
+        // Average retrieval metrics（只聚合「已评估」样本；负值哨兵不计入）
+        Map<String, Object> avgA = computeAverageRetrievalMetrics(resultsA);
+        Map<String, Object> avgB = computeAverageRetrievalMetrics(resultsB);
 
         comparison.put("retrievalMetricsA", avgA);
         comparison.put("retrievalMetricsB", avgB);
+        comparison.put("retrievalDelta", computeMetricDelta(avgA, avgB));
 
-        // Delta
-        Map<String, Double> delta = new HashMap<>();
-        for (String key : avgA.keySet()) {
-            double valA = avgA.getOrDefault(key, 0.0);
-            double valB = avgB.getOrDefault(key, 0.0);
-            delta.put(key, valB - valA);
-        }
-        comparison.put("retrievalDelta", delta);
-
-        // Average generation metrics
-        Map<String, Double> genA = computeAverageGenerationMetrics(resultsA);
-        Map<String, Double> genB = computeAverageGenerationMetrics(resultsB);
+        // Average generation metrics（同样剔除未评估哨兵，并输出每条指标的样本数）
+        Map<String, Object> genA = computeAverageGenerationMetrics(resultsA);
+        Map<String, Object> genB = computeAverageGenerationMetrics(resultsB);
         comparison.put("generationMetricsA", genA);
         comparison.put("generationMetricsB", genB);
-
-        Map<String, Double> genDelta = new HashMap<>();
-        for (String key : genA.keySet()) {
-            double valA = genA.getOrDefault(key, 0.0);
-            double valB = genB.getOrDefault(key, 0.0);
-            genDelta.put(key, valB - valA);
-        }
-        comparison.put("generationDelta", genDelta);
+        comparison.put("generationDelta", computeMetricDelta(genA, genB));
 
         return comparison;
     }
 
-    @SuppressWarnings("unchecked")
-    private Map<String, Double> computeAverageRetrievalMetrics(List<EvaluationResult> results) {
-        Map<String, Double> totals = new HashMap<>();
-        int count = 0;
+    /**
+     * 有效样本数键后缀：与指标值并列输出，例如 {@code faithfulnessEvaluatedCount}。
+     * <p>
+     * 上层据此判断某个均值背后有几条真实样本；为 0 表示该指标全部未评估。
+     */
+    static final String EVALUATED_COUNT_SUFFIX = "EvaluatedCount";
 
-        for (EvaluationResult result : results) {
-            if (result.getRetrievalMetrics() == null) continue;
-            try {
-                Map<String, Object> metrics = objectMapper.readValue(
-                        result.getRetrievalMetrics(),
-                        new TypeReference<Map<String, Object>>() {});
-                for (Map.Entry<String, Object> entry : metrics.entrySet()) {
-                    if (entry.getValue() instanceof Number) {
-                        totals.merge(entry.getKey(), ((Number) entry.getValue()).doubleValue(), Double::sum);
-                    }
+    /**
+     * 聚合检索指标（包级可见，便于单测）。
+     *
+     * @see #averageNumericMetrics(List, Function)
+     */
+    Map<String, Object> computeAverageRetrievalMetrics(List<EvaluationResult> results) {
+        return averageNumericMetrics(results, EvaluationResult::getRetrievalMetrics);
+    }
+
+    /**
+     * 聚合生成指标（包级可见，便于单测）。
+     *
+     * @see #averageNumericMetrics(List, Function)
+     */
+    Map<String, Object> computeAverageGenerationMetrics(List<EvaluationResult> results) {
+        return averageNumericMetrics(results, EvaluationResult::getGenerationMetrics);
+    }
+
+    /**
+     * 对一批评测结果里的数值指标做平均，带有两条<b>诚信约束</b>：
+     * <ol>
+     *   <li><b>负值即「不可用」哨兵</b>（如 {@code -1.0}），不是分数 —— 聚合时一律跳过，
+     *       绝不拉低均值。改动前把 {@code -1.0} 当正常值混入平均，会让「有一条未评估」
+     *       的指标均值被系统性拉低，等于产出一个错误数字。</li>
+     *   <li><b>全部样本都不可用 → 该指标值为 {@code null}</b>（显式「未评估」），
+     *       绝不填 {@code 0} / {@code -1} / 其他看起来像分数的占位值。</li>
+     * </ol>
+     * 每条指标额外输出 {@code <指标名>EvaluatedCount}，表示参与平均的真实样本数。
+     *
+     * @param results   评测结果列表
+     * @param extractor 从结果中取出指标 JSON 字符串的函数（检索 / 生成）
+     * @return 指标名 → 均值（未评估为 {@code null}），以及 {@code <指标名>EvaluatedCount} → 样本数
+     */
+    private Map<String, Object> averageNumericMetrics(List<EvaluationResult> results,
+                                                      Function<EvaluationResult, String> extractor) {
+        // 保持首次出现顺序，便于前端/日志稳定展示
+        Set<String> keyOrder = new LinkedHashSet<>();
+        Map<String, Double> totals = new LinkedHashMap<>();
+        Map<String, Integer> counts = new LinkedHashMap<>();
+
+        if (results != null) {
+            for (EvaluationResult result : results) {
+                if (result == null) {
+                    continue;
                 }
-                count++;
-            } catch (Exception e) {
-                log.debug("Failed to parse retrieval metrics: {}", e.getMessage());
+                String json = extractor.apply(result);
+                if (json == null) {
+                    continue;
+                }
+                try {
+                    Map<String, Object> metrics = objectMapper.readValue(
+                            json,
+                            new TypeReference<Map<String, Object>>() {});
+                    for (Map.Entry<String, Object> entry : metrics.entrySet()) {
+                        if (!(entry.getValue() instanceof Number number)) {
+                            continue;
+                        }
+                        String key = entry.getKey();
+                        keyOrder.add(key);
+                        double value = number.doubleValue();
+                        // 负值是「不可用」哨兵，不是分数 → 跳过，绝不参与平均
+                        if (value < 0.0) {
+                            continue;
+                        }
+                        totals.merge(key, value, Double::sum);
+                        counts.merge(key, 1, Integer::sum);
+                    }
+                } catch (Exception e) {
+                    log.debug("Failed to parse metrics: {}", e.getMessage());
+                }
             }
         }
 
-        Map<String, Double> averages = new HashMap<>();
-        if (count > 0) {
-            for (Map.Entry<String, Double> entry : totals.entrySet()) {
-                averages.put(entry.getKey(), entry.getValue() / count);
-            }
+        Map<String, Object> averages = new LinkedHashMap<>();
+        for (String key : keyOrder) {
+            int count = counts.getOrDefault(key, 0);
+            // 全部样本都不可用 → null（显式「未评估」），而不是 0 或 -1
+            averages.put(key, count > 0 ? totals.get(key) / count : null);
+            averages.put(key + EVALUATED_COUNT_SUFFIX, count);
         }
         return averages;
     }
 
-    @SuppressWarnings("unchecked")
-    private Map<String, Double> computeAverageGenerationMetrics(List<EvaluationResult> results) {
-        Map<String, Double> totals = new HashMap<>();
-        int count = 0;
-
-        for (EvaluationResult result : results) {
-            if (result.getGenerationMetrics() == null) continue;
-            try {
-                Map<String, Object> metrics = objectMapper.readValue(
-                        result.getGenerationMetrics(),
-                        new TypeReference<Map<String, Object>>() {});
-                for (Map.Entry<String, Object> entry : metrics.entrySet()) {
-                    if (entry.getValue() instanceof Number) {
-                        totals.merge(entry.getKey(), ((Number) entry.getValue()).doubleValue(), Double::sum);
-                    }
-                }
-                count++;
-            } catch (Exception e) {
-                log.debug("Failed to parse generation metrics: {}", e.getMessage());
+    /**
+     * 计算两组指标 Map 的差值。
+     * <p>
+     * 仅对「两侧都存在真实数值」的指标计算差值；显式跳过未评估（{@code null}）与
+     * 样本数键（{@code *EvaluatedCount}），避免把「没数据」当成 0 参与比较。
+     */
+    private Map<String, Double> computeMetricDelta(Map<String, Object> a, Map<String, Object> b) {
+        Map<String, Double> delta = new LinkedHashMap<>();
+        Set<String> keys = new LinkedHashSet<>(a.keySet());
+        keys.addAll(b.keySet());
+        for (String key : keys) {
+            if (key.endsWith(EVALUATED_COUNT_SUFFIX)) {
+                continue;
+            }
+            Object va = a.get(key);
+            Object vb = b.get(key);
+            if (va instanceof Number na && vb instanceof Number nb) {
+                delta.put(key, nb.doubleValue() - na.doubleValue());
             }
         }
-
-        Map<String, Double> averages = new HashMap<>();
-        if (count > 0) {
-            for (Map.Entry<String, Double> entry : totals.entrySet()) {
-                averages.put(entry.getKey(), entry.getValue() / count);
-            }
-        }
-        return averages;
+        return delta;
     }
 
     private String writeJson(Object obj) {
