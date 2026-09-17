@@ -96,6 +96,10 @@ public class KafkaConfig {
         factory.setConsumerFactory(consumerFactory);
         factory.setConcurrency(3);
         factory.getContainerProperties().setObservationEnabled(true);
+        // 自定义工厂不会自动继承 spring.kafka.listener.* 配置：
+        // 显式对齐 application.yml 里声明的 missing-topics-fatal=false。
+        // 审计消费者是旁路，broker 暂不可达 / topic 尚未创建时不应拖垮应用启动。
+        factory.getContainerProperties().setMissingTopicsFatal(false);
 
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(kafkaTemplate);
         DefaultErrorHandler errorHandler = new DefaultErrorHandler(recoverer, new FixedBackOff(1000L, 3));

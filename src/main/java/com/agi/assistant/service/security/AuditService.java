@@ -10,6 +10,7 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
 
 /**
  * 审计服务
@@ -62,6 +63,9 @@ public class AuditService {
                     ToolRiskLevel riskLevel, boolean blocked, String details) {
 
         AuditLog auditLog = new AuditLog();
+        // 幂等键：同一值同时进入 DB 记录与 Kafka 消息体（列宽 64，去横线 UUID 为 32 位），
+        // 消费者据此走 INSERT IGNORE 去重。
+        auditLog.setEventId(newEventId());
         auditLog.setUserId(userId);
         auditLog.setAction(action);
         auditLog.setResource(resource);
@@ -143,6 +147,18 @@ public class AuditService {
         } catch (Exception e) {
             log.error("Error sending audit log to Kafka: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 生成审计事件唯一标识。
+     * <p>
+     * 使用去横线的 UUID（32 位十六进制），满足 {@code audit_log.event_id VARCHAR(64)}
+     * 的长度约束，且每次调用互不相同（区别于固定值 / 时间戳可能碰撞的方案）。
+     *
+     * @return 32 位事件 ID
+     */
+    private String newEventId() {
+        return UUID.randomUUID().toString().replace("-", "");
     }
 
     private String truncateDetails(String details) {

@@ -10,6 +10,7 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -18,6 +19,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -174,5 +176,60 @@ class AuditServiceTest {
         service.log(1L, "X", "/y");
 
         verify(mapper).insert(any(AuditLog.class));
+    }
+
+    @Test
+    @DisplayName("落库时生成非空 eventId，长度 ≤ 64（匹配 audit_log.event_id 列定义）")
+    void eventIdIsGeneratedAndFitsColumn() {
+        AuditService service = newService();
+
+        service.log(1L, "X", "/y");
+
+        ArgumentCaptor<AuditLog> captor = ArgumentCaptor.forClass(AuditLog.class);
+        verify(mapper).insert(captor.capture());
+
+        String eventId = captor.getValue().getEventId();
+        assertThat(eventId).isNotBlank();
+        assertThat(eventId).hasSizeLessThanOrEqualTo(64);
+    }
+
+    @Test
+    @DisplayName("每次审计的 eventId 互不相同（幂等键不碰撞，非固定值/时间戳碰撞）")
+    void eventIdsAreUniquePerRecord() {
+        AuditService service = newService();
+
+        service.log(1L, "A", "/1");
+        service.log(2L, "B", "/2");
+
+        ArgumentCaptor<AuditLog> captor = ArgumentCaptor.forClass(AuditLog.class);
+        verify(mapper, times(2)).insert(captor.capture());
+
+        List<AuditLog> saved = captor.getAllValues();
+        assertThat(saved).hasSize(2);
+        assertThat(saved.get(0).getEventId()).isNotBlank();
+        assertThat(saved.get(1).getEventId()).isNotBlank();
+        assertThat(saved.get(0).getEventId()).isNotEqualTo(saved.get(1).getEventId());
+    }
+
+    @Test
+    @DisplayName("同一 eventId 同时进入 DB 记录与 Kafka 消息体（幂等的依据一致）")
+    void eventIdSharedBetweenDbAndKafka() {
+        AuditService service = newService();
+        @SuppressWarnings("unchecked")
+        KafkaTemplate<String, Object> kafka = mock(KafkaTemplate.class);
+        when(kafka.send(anyString(), anyString(), any()))
+                .thenReturn(CompletableFuture.<SendResult<String, Object>>completedFuture(null));
+        ReflectionTestUtils.setField(service, "kafkaTemplate", kafka);
+
+        service.log(9L, "TOOL_EXECUTE", "run_code", ToolRiskLevel.WARN, false, "details");
+
+        ArgumentCaptor<AuditLog> dbCaptor = ArgumentCaptor.forClass(AuditLog.class);
+        verify(mapper).insert(dbCaptor.capture());
+        ArgumentCaptor<Object> kafkaCaptor = ArgumentCaptor.forClass(Object.class);
+        verify(kafka).send(anyString(), anyString(), kafkaCaptor.capture());
+
+        AuditLog sent = (AuditLog) kafkaCaptor.getValue();
+        assertThat(sent.getEventId()).isNotBlank()
+                .isEqualTo(dbCaptor.getValue().getEventId());
     }
 }
