@@ -262,7 +262,8 @@ public class ChatServiceImpl implements ChatService {
                 sendThinkingEvent(emitter, "memory", "正在查询记忆系统...");
                 try {
                     context = harnessRuntime.execute(() ->
-                                    contextAssembly.assembleContext(userId, request.getMessage()),
+                                    contextAssembly.assembleContext(userId, sessionId.toString(),
+                                            request.getMessage()),
                             "memory-assembly", 5000);
                     sendThinkingEvent(emitter, "memory_done", "记忆查询完成");
                 } catch (Exception e) {
@@ -276,8 +277,11 @@ public class ChatServiceImpl implements ChatService {
                 sendThinkingEvent(emitter, "react", "检测到复杂问题，启动 ReAct 多步推理...");
                 try {
                     final Long reactUserId = userId;
+                    // 把 sessionId 一并交给 ReAct 引擎：运行态记忆（计划/工具调用/任务）
+                    // 以 sessionId 为 key，没有它这层记忆就只能永远是空容器
                     String reactAnswer = harnessRuntime.execute(() ->
-                                    reactEngine.run(request.getMessage(), 5, reactUserId),
+                                    reactEngine.run(request.getMessage(), 5, reactUserId,
+                                            sessionId.toString()),
                             "react-engine", 60000,
                             // 真正的降级：ReAct 失败时返回空串，走下面的普通流式回答，
                             // 而不是像以前那样只演戏式地返回 null

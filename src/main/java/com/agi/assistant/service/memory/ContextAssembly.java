@@ -57,21 +57,27 @@ public class ContextAssembly {
      * - "ragResults": retrieved document chunks via hybrid RAG
      * - "userProfile": user profile summary
      *
-     * @param userId the user identifier
-     * @param taskId the task/query identifier for RAG retrieval
+     * <p><b>key 语义修复（P0-5）</b>：短期记忆的写入方（ChatServiceImpl）以
+     * <b>sessionId</b> 为 key，而本方法此前用 <b>userId</b> 去读 —— 两个是不同的
+     * Long，读回来永远是空。现在显式接收 sessionId，读写两侧的 key 终于一致。
+     * 长期记忆 / 图谱 / 用户画像仍然按 userId（它们的语义就是「用户维度」）。
+     *
+     * @param userId    the user identifier
+     * @param sessionId 短期记忆 / 运行态记忆的 key（与会话写入侧一致）
+     * @param taskId    the task/query identifier for RAG retrieval
      * @return assembled context map
      */
-    public Map<String, Object> assembleContext(Long userId, String taskId) {
+    public Map<String, Object> assembleContext(Long userId, String sessionId, String taskId) {
         Map<String, Object> context = new HashMap<>();
 
-        // 1. Short-term memory (recent conversation)
+        // 1. Short-term memory (recent conversation) —— key 必须与写入侧（sessionId）一致
         try {
             List<ChatMessage> recentMessages = shortTermMemory.getRecentMessages(
-                    userId.toString(), 10);
+                    sessionId, 10);
             context.put("shortTermMessages", recentMessages);
             context.put("shortTermCount", recentMessages.size());
         } catch (Exception e) {
-            log.warn("Failed to load short-term memory for user [{}]: {}", userId, e.getMessage());
+            log.warn("Failed to load short-term memory for session [{}]: {}", sessionId, e.getMessage());
             context.put("shortTermMessages", List.of());
             context.put("shortTermCount", 0);
         }
@@ -112,16 +118,15 @@ public class ContextAssembly {
             context.put("userProfile", Map.of());
         }
 
-        // 6. Runtime state (Planner + Tool + Task)
+        // 6. Runtime state (Planner + Tool + Task) —— key 与写入侧（sessionId）一致
         try {
-            String sessionId = userId.toString();
             String runtimeContext = runtimeStateMemory.assembleRuntimeContext(sessionId);
             context.put("runtimeState", runtimeContext);
             context.put("plannerState", runtimeStateMemory.getOrCreatePlannerState(sessionId));
             context.put("toolState", runtimeStateMemory.getOrCreateToolState(sessionId));
             context.put("activeTasks", runtimeStateMemory.getActiveTasks(sessionId));
         } catch (Exception e) {
-            log.warn("Failed to load runtime state for user [{}]: {}", userId, e.getMessage());
+            log.warn("Failed to load runtime state for session [{}]: {}", sessionId, e.getMessage());
             context.put("runtimeState", "");
         }
 

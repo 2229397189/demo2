@@ -4,6 +4,7 @@ import com.agi.assistant.config.OpenAIConfig;
 import com.agi.assistant.model.entity.SearchResult;
 import com.agi.assistant.model.enums.TaskStatus;
 import com.agi.assistant.model.enums.ToolStatus;
+import com.agi.assistant.service.memory.RuntimeStateMemory;
 import com.agi.assistant.service.rag.HybridRetrievalService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.AllArgsConstructor;
@@ -53,20 +54,33 @@ public class ReactEngine {
     private final ToolRegistry toolRegistry;
     private final HybridRetrievalService hybridRetrievalService;
     private final OpenAIConfig openAIConfig;
+    private final RuntimeStateMemory runtimeStateMemory;
     private final Map<String, List<ReActStep>> stepCache;
     private final ObjectMapper objectMapper;
 
     /** 当前请求的用户 ID，用于把 userId 透传给需要它的工具（如 memory_search） */
     private final ThreadLocal<Long> currentUserId = new ThreadLocal<>();
 
+    /**
+     * 当前请求的会话 ID（运行态记忆的 key）。
+     * <p>
+     * 埋点说明：ReAct 的 Action 语法里同样没有位置放 sessionId，
+     * 沿用 userId 的 ThreadLocal 方案。act() 每次执行工具后都会用它
+     * 把「工具名 / 参数 / 结果 / 耗时」写进运行态记忆 —— 此前这层记忆的
+     * 写方法全项目零调用，运行态层是个永远为空的容器。
+     */
+    private final ThreadLocal<String> currentSessionId = new ThreadLocal<>();
+
     public ReactEngine(@Lazy WebClient openAiWebClient,
                        ToolRegistry toolRegistry,
                        @Lazy HybridRetrievalService hybridRetrievalService,
-                       OpenAIConfig openAIConfig) {
+                       OpenAIConfig openAIConfig,
+                       RuntimeStateMemory runtimeStateMemory) {
         this.openAiWebClient = openAiWebClient;
         this.toolRegistry = toolRegistry;
         this.hybridRetrievalService = hybridRetrievalService;
         this.openAIConfig = openAIConfig;
+        this.runtimeStateMemory = runtimeStateMemory;
         this.stepCache = new LinkedHashMap<>(100, 0.75f, true) {
             @Override
             protected boolean removeEldestEntry(Map.Entry<String, List<ReActStep>> eldest) {
@@ -122,7 +136,7 @@ public class ReactEngine {
      * @return the final answer from the ReAct loop
      */
     public String run(String query, int maxIterations) {
-        return run(query, maxIterations, null);
+        return run(query, maxIterations, null, null);
     }
 
     /**
@@ -137,20 +151,82 @@ public class ReactEngine {
      * @return the final answer from the ReAct loop
      */
     public String run(String query, int maxIterations, Long userId) {
+        return run(query, maxIterations, userId, null);
+    }
+
+    /**
+     * Run the ReAct loop，并把整个过程写进运行态记忆（P0-6 埋点）。
+     * <p>
+     * 修复说明：此前 {@code RuntimeStateMemory} 的 9 个写方法全项目零调用 ——
+     * 任务生命周期、工具调用历史、计划状态都只被读从不被写，
+     * 「运行态记忆层」实际是个永远为空的容器。现在：
+     * <ul>
+     *   <li>循环开始 → createTask + IN_PROGRESS</li>
+     *   <li>每轮 Thought → updateTaskProgress（当前推理进展）</li>
+     *   <li>每次 act() → recordToolCall（工具名/参数/结果/耗时）</li>
+     *   <li>结束 → COMPLETED / FAILED + addTaskResult（最终答案）</li>
+     * </ul>
+     * 全部走 try-catch 包裹：埋点只是观测，绝不能让记忆写失败打断推理。
+     *
+     * @param sessionId 会话 ID（运行态记忆的 key），可为 null（不埋点）
+     */
+    public String run(String query, int maxIterations, Long userId, String sessionId) {
         if (query == null || query.isBlank()) {
             return "";
         }
 
         currentUserId.set(userId);
+        currentSessionId.set(sessionId);
+
+        String taskId = startRuntimeTask(sessionId, query);
         try {
-            return runLoop(query, maxIterations);
+            String answer = runLoop(query, maxIterations, taskId);
+            finishRuntimeTask(sessionId, taskId, answer);
+            return answer;
         } finally {
-            // 线程池复用线程，必须清理，否则下一个请求会继承上一个用户的身份
+            // 线程池复用线程，必须清理，否则下一个请求会继承上一个用户的身份/会话
             currentUserId.remove();
+            currentSessionId.remove();
         }
     }
 
-    private String runLoop(String query, int maxIterations) {
+    /** 在运行态记忆里建任务；任何失败都只记日志，不影响推理主流程 */
+    private String startRuntimeTask(String sessionId, String query) {
+        if (sessionId == null || runtimeStateMemory == null) {
+            return null;
+        }
+        try {
+            String name = "ReAct: " + (query.length() > 30 ? query.substring(0, 30) + "…" : query);
+            String taskId = runtimeStateMemory.createTask(sessionId, name, "ReAct 多步推理").getId();
+            runtimeStateMemory.updateTaskStatus(sessionId, taskId,
+                    RuntimeStateMemory.TaskStatus.IN_PROGRESS);
+            return taskId;
+        } catch (Exception e) {
+            log.debug("Runtime task tracking unavailable for session [{}]: {}", sessionId, e.getMessage());
+            return null;
+        }
+    }
+
+    /** 推理结束后回写任务状态与最终答案 */
+    private void finishRuntimeTask(String sessionId, String taskId, String answer) {
+        if (sessionId == null || taskId == null || runtimeStateMemory == null) {
+            return;
+        }
+        try {
+            boolean conclusive = answer != null && !answer.isBlank()
+                    && !answer.startsWith("经过多轮推理");
+            runtimeStateMemory.updateTaskStatus(sessionId, taskId, conclusive
+                    ? RuntimeStateMemory.TaskStatus.COMPLETED
+                    : RuntimeStateMemory.TaskStatus.FAILED);
+            if (answer != null) {
+                runtimeStateMemory.addTaskResult(sessionId, taskId, "answer", answer);
+            }
+        } catch (Exception e) {
+            log.debug("Failed to finalize runtime task [{}]: {}", taskId, e.getMessage());
+        }
+    }
+
+    private String runLoop(String query, int maxIterations, String taskId) {
         int iterations = Math.max(1, Math.min(maxIterations, 10));
         log.info("Starting ReAct loop: query='{}', maxIterations={}",
                 query.length() > 50 ? query.substring(0, 50) + "..." : query, iterations);
@@ -174,6 +250,17 @@ public class ReactEngine {
                     .type("thought")
                     .content(thought)
                     .build());
+
+            // 运行态埋点：把当前推理进展写进任务记忆（失败不影响主流程）
+            if (taskId != null && runtimeStateMemory != null) {
+                try {
+                    runtimeStateMemory.updateTaskProgress(
+                            currentSessionId.get(), taskId,
+                            "第 " + (i + 1) + " 轮: "
+                                    + (thought.length() > 80 ? thought.substring(0, 80) + "…" : thought));
+                } catch (Exception ignored) {
+                }
+            }
 
             context.append("Thought: ").append(thought).append("\n");
 
@@ -295,6 +382,46 @@ public class ReactEngine {
     }
 
     /**
+     * Execute an action and record it into runtime state memory.
+     * <p>
+     * 包装层只做两件事：计时 + 把「工具名/参数/结果/耗时」写进运行态记忆；
+     * 真正的执行逻辑在 {@link #doAct(String, String)}。
+     */
+    public String act(String action, String params) {
+        long start = System.currentTimeMillis();
+        String observation = doAct(action, params);
+        recordToolCall(action, params, observation, System.currentTimeMillis() - start);
+        return observation;
+    }
+
+    /**
+     * 把一次工具调用写进运行态记忆。
+     * <p>
+     * 会话未传入（sessionId 为 null）时静默跳过 —— 单测 / DAG 等调用方没有会话概念。
+     * 成败判定用观察结果的前缀做启发式：doAct 的三种失败形态分别是
+     * "Error: ..."（空动作）、"Tool [...] failed: ..."（注册表工具报错）、
+     * "Unknown action: ..."（动作不存在），其余视为成功。
+     */
+    private void recordToolCall(String action, String params,
+                                String observation, long durationMs) {
+        String sessionId = currentSessionId.get();
+        if (sessionId == null || runtimeStateMemory == null) {
+            return;
+        }
+        boolean success = observation != null
+                && !observation.startsWith("Error")
+                && !observation.startsWith("Tool [")
+                && !observation.startsWith("Unknown action");
+        try {
+            runtimeStateMemory.recordToolCall(sessionId, action,
+                    Map.of("param", params == null ? "" : params),
+                    observation, success, durationMs);
+        } catch (Exception e) {
+            log.debug("Failed to record tool call [{}]: {}", action, e.getMessage());
+        }
+    }
+
+    /**
      * Execute an action by name and parameters.
      * Attempts to use the ToolRegistry first, then falls back to built-in actions.
      *
@@ -302,7 +429,7 @@ public class ReactEngine {
      * @param params the action parameters
      * @return the observation (result) of the action
      */
-    public String act(String action, String params) {
+    private String doAct(String action, String params) {
         if (action == null || action.isBlank()) {
             return "Error: empty action";
         }

@@ -5,7 +5,6 @@ import com.agi.assistant.config.OpenAIConfig;
 import com.agi.assistant.model.entity.ChatMessage;
 import com.agi.assistant.model.entity.Memory;
 import com.agi.assistant.model.enums.MemoryType;
-import com.agi.assistant.service.rag.EmbeddingService;
 import com.agi.assistant.service.rag.MilvusService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,7 +18,6 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 
 import java.time.LocalDateTime;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -65,7 +63,6 @@ public class MemoryConsolidation {
     private final ShortTermMemory shortTermMemory;
     private final LongTermMemory longTermMemory;
     private final GraphMemory graphMemory;
-    private final EmbeddingService embeddingService;
     private final MemoryMapper memoryMapper;
     private final MilvusService milvusService;
     private final WebClient openAiWebClient;
@@ -99,7 +96,6 @@ public class MemoryConsolidation {
     public MemoryConsolidation(ShortTermMemory shortTermMemory,
                                LongTermMemory longTermMemory,
                                GraphMemory graphMemory,
-                               EmbeddingService embeddingService,
                                MemoryMapper memoryMapper,
                                MilvusService milvusService,
                                WebClient openAiWebClient,
@@ -107,7 +103,6 @@ public class MemoryConsolidation {
         this.shortTermMemory = shortTermMemory;
         this.longTermMemory = longTermMemory;
         this.graphMemory = graphMemory;
-        this.embeddingService = embeddingService;
         this.memoryMapper = memoryMapper;
         this.milvusService = milvusService;
         this.openAiWebClient = openAiWebClient;
@@ -189,9 +184,10 @@ public class MemoryConsolidation {
             shortTermMemory.setConsolidationWatermark(
                     sessionId, fingerprint(recentMessages.get(recentMessages.size() - 1)));
 
-            // 7. Decay importance of this user's old memories
-            decayImportance(userId);
-
+            // 7. 重要性衰减已移交 MemoryMaintenanceScheduler 每日定时执行。
+            //    修复前这里每轮整合都调一次 decayImportance(userId)，与定时任务叠加成
+            //    「双通道衰减」：同一批 7 天未访问的记忆会被多次 ×0.95，
+            //    衰减速度远超设计意图。对话路径只负责写入，衰减统一走定时任务。
             log.info("Consolidation complete for user [{}]: newMessages={}, extracted={}, deduplicated={}, saved={}",
                     userId, newMessages.size(), extractedFacts.size(), deduplicated.size(), saved);
 
@@ -469,28 +465,22 @@ public class MemoryConsolidation {
             }
             seenHashes.add(hash);
 
-            // Embedding similarity dedup against existing memories
-            List<Float> embedding = embeddingService.embed(content);
-            if (!embedding.isEmpty()) {
-                List<String> existing = longTermMemory.recallMemory(userId, content, 3);
-                boolean isDuplicate = false;
-
-                for (String existingContent : existing) {
-                    List<Float> existingEmbedding = embeddingService.embed(existingContent);
-                    if (!existingEmbedding.isEmpty()) {
-                        double similarity = cosineSimilarity(embedding, existingEmbedding);
-                        if (similarity >= SIMILARITY_DEDUP_THRESHOLD) {
-                            log.debug("Dedup: similarity {} exceeds threshold for: {}",
-                                    similarity, content.substring(0, Math.min(content.length(), 50)));
-                            isDuplicate = true;
-                            break;
-                        }
-                    }
-                }
-
+            // Embedding similarity dedup against existing memories.
+            // 修复（P2-8）：此前先 recallMemory 召回 3 条，再对每条既有记忆**重新调一次
+            // embedding API** 算余弦 —— 每条事实要 1+N 次调用。现在改走 findSimilar：
+            // 相似度直接取向量库召回时的 score，总共 1 次 embed + 1 次向量检索。
+            try {
+                boolean isDuplicate = !longTermMemory
+                        .findSimilar(userId, content, SIMILARITY_DEDUP_THRESHOLD, 3)
+                        .isEmpty();
                 if (isDuplicate) {
+                    log.debug("Dedup: semantic duplicate detected for: {}",
+                            content.substring(0, Math.min(content.length(), 50)));
                     continue;
                 }
+            } catch (Exception e) {
+                // 向量库不可用时不阻断写入：宁可有少量重复，也不丢用户记忆
+                log.debug("Semantic dedup skipped (vector store unavailable): {}", e.getMessage());
             }
 
             deduplicated.add(fact);
@@ -559,55 +549,6 @@ public class MemoryConsolidation {
         }
     }
 
-    /**
-     * Apply importance decay for a specific user's memories.
-     *
-     * @param userId the user identifier
-     */
-    public void decayImportance(Long userId) {
-        if (userId == null) {
-            return;
-        }
-
-        try {
-            LambdaQueryWrapper<Memory> query = new LambdaQueryWrapper<Memory>()
-                            .eq(Memory::getUserId, userId);
-            List<Memory> userMemories = memoryMapper.selectList(query);
-            int decayed = 0;
-
-            for (Memory memory : userMemories) {
-                if (memory.getLastAccessedAt() == null) {
-                    continue;
-                }
-
-                long daysSinceAccess = ChronoUnit.DAYS.between(
-                        memory.getLastAccessedAt(), LocalDateTime.now());
-
-                if (daysSinceAccess >= DEFAULT_IMPORTANCE_DECAY_DAYS) {
-                    double currentImportance = memory.getImportance() != null
-                            ? memory.getImportance() : 1.0;
-                    double newImportance = currentImportance * DECAY_FACTOR;
-
-                    if (newImportance < MIN_IMPORTANCE) {
-                        newImportance = MIN_IMPORTANCE;
-                    }
-
-                    if (Math.abs(newImportance - currentImportance) > 0.001) {
-                        memory.setImportance(newImportance);
-                        memory.setUpdatedAt(LocalDateTime.now());
-                        memoryMapper.updateById(memory);
-                        decayed++;
-                    }
-                }
-            }
-
-            log.debug("Importance decay for user [{}]: {} memories updated", userId, decayed);
-
-        } catch (Exception e) {
-            log.error("Importance decay for user [{}] failed: {}", userId, e.getMessage(), e);
-        }
-    }
-
     // ----------------------------------------------------------------
     //  Internal
     // ----------------------------------------------------------------
@@ -644,26 +585,5 @@ public class MemoryConsolidation {
         }
 
         return null;
-    }
-
-    private double cosineSimilarity(List<Float> a, List<Float> b) {
-        if (a == null || b == null || a.size() != b.size() || a.isEmpty()) {
-            return 0.0;
-        }
-
-        double dotProduct = 0.0;
-        double normA = 0.0;
-        double normB = 0.0;
-
-        for (int i = 0; i < a.size(); i++) {
-            float va = a.get(i);
-            float vb = b.get(i);
-            dotProduct += va * vb;
-            normA += va * va;
-            normB += vb * vb;
-        }
-
-        double denominator = Math.sqrt(normA) * Math.sqrt(normB);
-        return denominator == 0.0 ? 0.0 : dotProduct / denominator;
     }
 }

@@ -97,8 +97,11 @@ public class LongTermMemory {
         // Generate embedding for similarity search deduplication
         List<Float> embedding = embeddingService.embed(content);
         if (!embedding.isEmpty()) {
-            // Check for embedding-similar memories
-            List<SearchResult> similar = milvusService.searchVectors(embedding, 3);
+            // Check for embedding-similar memories.
+            // 必须带 user 过滤（P2-6）：document_id 里存的就是 "user_{id}"，
+            // 不加过滤会把「别人的相似记忆」当成重复，既误判又跨用户泄露内容相似性。
+            String filterExpr = "document_id == \"user_" + userId + "\"";
+            List<SearchResult> similar = milvusService.searchVectors(embedding, 3, filterExpr);
             for (SearchResult result : similar) {
                 if (result.getScore() >= SIMILARITY_THRESHOLD) {
                     log.debug("Duplicate memory detected via embedding for user [{}]: score={}",
