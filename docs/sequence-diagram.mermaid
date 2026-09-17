@@ -1,0 +1,48 @@
+sequenceDiagram
+    autonumber
+    participant U as 前端/调用方
+    participant C as EvaluationController
+    participant S as EvaluationServiceImpl
+    participant R as EvaluationRunner
+    participant D as BenchmarkDataset
+    participant HR as HybridRetrievalService
+    participant RE as RetrievalEvaluator
+    participant MR as ModelProviderRouter
+    participant GE as GenerationEvaluator
+    participant LJ as LlmJudge
+    participant EM as EmbeddingService
+    participant DB as evaluation_result
+
+    U->>C: POST /tasks/{id}/run
+    C->>S: runTask(taskId)
+    S->>R: runEvaluation(taskId) @Async
+    R->>D: loadDataset(datasetId)
+    D-->>R: List<GoldenQuery>
+    loop 每条 golden query
+        R->>HR: retrieve(query, strategy, 10)
+        HR-->>R: List<SearchResult>(docIds+contexts)
+        R->>RE: evaluate(retrievedDocIds, relevantDocIds, 10)
+        RE-->>R: RetrievalMetrics(Recall/Precision/MRR/NDCG/HitRate)
+        R->>MR: chat([system,user]) 生成答案
+        MR-->>R: generatedAnswer
+        Note over R,GE: RAGAS 四指标
+        R->>GE: evaluate(question, answer, contexts, expectedAnswer)
+        GE->>LJ: decomposeClaims(answer)
+        LJ-->>GE: List<Claim>
+        GE->>LJ: isSupported(claim, contexts) 逐条
+        LJ-->>GE: boolean
+        GE->>LJ: reverseGenerateQuestions(answer, 3)
+        LJ-->>GE: List<String>
+        GE->>EM: embed(生成问题 / 原问题)
+        EM-->>GE: 向量
+        GE->>LJ: isRelevant(question, chunk) 逐 chunk
+        LJ-->>GE: boolean
+        GE->>LJ: decomposeClaims(expectedAnswer)
+        LJ-->>GE: List<Claim>
+        GE-->>R: GenerationMetrics(4 指标 + 明细)
+        R->>DB: insert(EvaluationResult)
+    end
+    R->>S: 更新 task 状态 COMPLETED/FAILED
+    U->>C: POST /tasks/{id}/snapshot
+    C->>R: EvaluationSnapshotService.exportSnapshot(taskId, strategy)
+    R-->>U: docs/eval-snapshots/xxx.json + xxx.md（真实数值）

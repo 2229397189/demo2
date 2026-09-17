@@ -1,0 +1,122 @@
+classDiagram
+    class GenerationEvaluator {
+        +GenerationMetrics evaluate(question, answer, contexts, expectedAnswer)
+        -double scoreFaithfulness(answer, contexts)
+        -double scoreAnswerRelevancy(question, answer)
+        -double scoreContextPrecision(question, contexts)
+        -double scoreContextRecall(expectedAnswer, contexts)
+    }
+    class GenerationMetrics {
+        +double faithfulness
+        +double answerRelevancy
+        +double contextPrecision
+        +double contextRecall
+        +List~Claim~ faithfulnessClaims
+        +List~Boolean~ contextRelevance
+        +String answerRelevancyMethod
+    }
+    class LlmJudge {
+        <<interface>>
+        +String complete(sys,user)
+        +List~String~ decomposeClaims(text)
+        +boolean isSupported(claim,context)
+        +boolean isRelevant(question,chunk)
+        +List~String~ reverseGenerateQuestions(answer,n)
+    }
+    class RagasScorer {
+        +double faithfulness(claims)
+        +double answerRelevancy(qVecs,origVec)
+        +double averagePrecision(relevance)
+        +double contextRecall(claims)
+    }
+    class Claim {
+        +String text
+        +boolean supported
+    }
+    class EvaluationRunner {
+        +void runEvaluation(taskId)
+    }
+    class EvaluationSnapshotService {
+        +EvaluationSnapshot exportSnapshot(taskId, strategy)
+    }
+    class ModelProvider {
+        <<interface>>
+        +String name()
+        +boolean isAvailable()
+        +String chat(messages,t,mt)
+    }
+    class GlmModelProvider
+    class ArkModelProvider
+    class ModelProviderRouter {
+        +String chat(messages,t,mt)
+        +Map availability()
+    }
+    class ToolRegistry {
+        +registerTool(name,desc,risk,ToolHandler)
+        +ToolResult executeTool(name,params,userId)
+    }
+    class ToolExecutorService {
+        +ToolResult executeIsolated(name,action,timeout)
+    }
+    class ToolResult {
+        +String toolName
+        +ToolStatus status
+        +String content
+        +Map data
+        +String error
+        +markPartial(reason)
+    }
+    class ToolHandler {
+        <<interface>>
+        +ToolResult handle(params)
+    }
+    class ChatFallbackProvider {
+        +retrievalFallback(query)
+        +webSearchFallback(query)
+        +memoryFallback(userId,sessionId,query)
+    }
+    class FallbackStrategy {
+        +executeChain(primary,tiers,taskName)
+        +gracefulDegrade(task,degraded,taskName)
+    }
+    class HarnessRuntime {
+        +T execute(task,taskName,timeout,fallback)
+    }
+    class RetryPolicy {
+        +executeWithRetry(action,policy,onRetry)
+    }
+    class StateMachine {
+        +transition(name,state)
+        +remove(name)
+    }
+    class RuntimeStateMemory {
+        +updatePlan(sessionId,steps)
+        +advancePlanStep(sessionId)
+        +completePlan(sessionId)
+    }
+    class ReactEngine {
+        +String run(query,max,userId,sessionId)
+    }
+    class AuditKafkaConsumer
+    class AuditService
+
+    GenerationEvaluator --> LlmJudge : uses
+    GenerationEvaluator --> RagasScorer : uses
+    GenerationEvaluator ..> GenerationMetrics : produces
+    RagasScorer ..> Claim : uses
+    EvaluationRunner --> GenerationEvaluator : calls
+    EvaluationRunner --> ModelProviderRouter : answer gen
+    ModelProviderRouter --> ModelProvider : routes
+    ModelProvider <|.. GlmModelProvider
+    ModelProvider <|.. ArkModelProvider
+    ToolRegistry --> ToolExecutorService : delegates
+    ToolExecutorService ..> ToolResult : returns
+    ToolRegistry ..> ToolHandler : holds
+    ToolRegistry ..> ToolResult : returns
+    ChatFallbackProvider ..> FallbackStrategy : uses
+    HarnessRuntime --> FallbackStrategy : uses
+    HarnessRuntime --> RetryPolicy : uses
+    HarnessRuntime --> StateMachine : drives
+    ReactEngine --> RuntimeStateMemory : planner/tool
+    ReactEngine --> ToolRegistry : act
+    AuditService ..> AuditKafkaConsumer : kafka
