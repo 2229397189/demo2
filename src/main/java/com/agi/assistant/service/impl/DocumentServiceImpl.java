@@ -16,6 +16,7 @@ import com.agi.assistant.service.rag.EmbeddingService;
 import com.agi.assistant.service.rag.GraphRetrievalService;
 import com.agi.assistant.service.rag.MilvusService;
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.io.MemoryUsageSetting;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.tika.Tika;
 import org.apache.tika.exception.TikaException;
@@ -206,7 +207,9 @@ public class DocumentServiceImpl implements DocumentService {
             String rawContent = resolveRawContent(filePath, fileType);
 
             if (rawContent == null || rawContent.isBlank()) {
-                throw new RuntimeException("文档内容为空或无法解析");
+                // 明确指出扫描件场景：纯图片 PDF 不含文本层，当前不支持 OCR（P2-9 遗留项）
+                throw new RuntimeException("文档内容为空或无法解析"
+                        + "（若是扫描件/纯图片 PDF，当前不支持 OCR 文字识别）");
             }
 
             String documentIdStr = String.valueOf(id);
@@ -445,12 +448,18 @@ public class DocumentServiceImpl implements DocumentService {
 
     /**
      * 使用 Apache PDFBox 解析 PDF 文件，提供更好的中文支持。
+     * <p>
+     * 修复说明（P2-9）：此前 {@code PDDocument.load(File)} 会把整个 PDF
+     * （含页面位图等中间结构）全部读进堆内存，大文件直接 OOM。
+     * 现在使用 {@code MemoryUsageSetting.setupMixed(16MB)}：
+     * 超过 16MB 的解析中间态自动落到临时文件，堆内存占用有上界。
      *
      * @param filePath PDF 文件路径
      * @return 提取的文本内容
      */
     private String parsePdfWithPdfBox(Path filePath) {
-        try (PDDocument document = PDDocument.load(filePath.toFile())) {
+        try (PDDocument document = PDDocument.load(
+                filePath.toFile(), MemoryUsageSetting.setupMixed(16 * 1024 * 1024))) {
             PDFTextStripper stripper = new PDFTextStripper();
             stripper.setSortByPosition(true);  // 按位置排序，保持阅读顺序
             String content = stripper.getText(document);
