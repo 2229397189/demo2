@@ -6,6 +6,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
 import jakarta.annotation.PostConstruct;
+import java.util.function.IntConsumer;
 import java.util.function.Supplier;
 
 /**
@@ -52,6 +53,26 @@ public class RetryPolicy {
      * @return 动作执行结果
      */
     public static <T> T executeWithRetry(Supplier<T> action, RetryPolicy policy) {
+        return executeWithRetry(action, policy, null);
+    }
+
+    /**
+     * 使用重试策略执行给定动作，并在每次「决定重试、尚未发起下一次」之前回调 {@code onRetry}。
+     * <p>
+     * 该回调存在的根因：重试循环完全封装在本方法内部，外界没有任何时机介入，
+     * 导致 {@code RETRYING} 状态永远观测不到。现在上层（如 {@code HarnessRuntime}）
+     * 可以在重试真正发生的那一刻驱动状态机进入 {@code RETRYING}。
+     * <p>
+     * 回调是纯观测埋点：它抛出的任何异常都会被吞掉并降级为 debug 日志，
+     * <b>绝不影响重试主流程</b>。
+     *
+     * @param action  要执行的动作
+     * @param policy  重试策略配置
+     * @param onRetry 每次决定重试时（发起下一次之前）回调，参数为「当前已失败的次数」；可为 null
+     * @param <T>     返回值类型
+     * @return 动作执行结果
+     */
+    public static <T> T executeWithRetry(Supplier<T> action, RetryPolicy policy, IntConsumer onRetry) {
         int maxRetries = policy.getMaxRetries();
         long retryDelay = policy.getRetryDelay();
         double backoffMultiplier = policy.getBackoffMultiplier();
@@ -76,10 +97,29 @@ public class RetryPolicy {
                 }
 
                 log.warn("Attempt {}/{} failed: {}", attempt + 1, maxRetries + 1, e.getMessage());
+
+                // 决定要重试：在发起下一次尝试（进入下一次循环、执行退避等待）之前回调。
+                if (attempt < maxRetries && onRetry != null) {
+                    notifyRetry(onRetry, attempt + 1);
+                }
             }
         }
         throw new RetryExhaustedException(
                 "All " + (maxRetries + 1) + " attempts failed", lastException);
+    }
+
+    /**
+     * 触发重试回调；回调异常被吞掉，仅记 debug，保证观测埋点不影响重试主流程。
+     *
+     * @param onRetry        重试回调
+     * @param failedAttempts 当前已失败的次数
+     */
+    private static void notifyRetry(IntConsumer onRetry, int failedAttempts) {
+        try {
+            onRetry.accept(failedAttempts);
+        } catch (Exception e) {
+            log.debug("Retry callback failed (ignored): {}", e.getMessage());
+        }
     }
 
     /**

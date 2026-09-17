@@ -145,10 +145,11 @@ public class HarnessRuntime {
     public <T> T execute(Callable<T> task, String taskName, long timeout, Supplier<T> fallbackSupplier) {
         // 初始化状态
         stateMachine.reset(taskName);
-        stateMachine.transition(taskName, TaskStatus.RUNNING);
+        safeTransition(taskName, TaskStatus.RUNNING);
 
         try {
-            // 使用重试策略执行
+            // 使用重试策略执行；每次「决定重试」之前用回调驱动状态机进入 RETRYING，
+            // 让此前只在转移表里存在、实际永远观测不到的 RETRYING 真正可达。
             T result = RetryPolicy.executeWithRetry(() -> {
                 try {
                     return executeWithTimeout(task, timeout);
@@ -157,9 +158,9 @@ public class HarnessRuntime {
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }
-            }, retryPolicy);
+            }, retryPolicy, failedAttempts -> onRetrying(taskName, failedAttempts));
 
-            stateMachine.transition(taskName, TaskStatus.COMPLETED);
+            safeTransition(taskName, TaskStatus.COMPLETED);
             log.info("Task [{}] completed successfully", taskName);
             return result;
 
@@ -167,14 +168,16 @@ public class HarnessRuntime {
             log.warn("Task [{}] retries exhausted ({}), attempting registered fallback",
                     taskName, e.getMessage());
 
-            // 重试耗尽 → 尝试降级
-            stateMachine.transition(taskName, TaskStatus.FAILED);
-            stateMachine.transition(taskName, TaskStatus.FALLBACK);
-            stateMachine.transition(taskName, TaskStatus.RUNNING);
+            // 重试耗尽 → 尝试降级：RUNNING → FAILED → FALLBACK → RUNNING（符合 StateMachine.TRANSITIONS）
+            safeTransition(taskName, TaskStatus.FAILED);
+            safeTransition(taskName, TaskStatus.FALLBACK);
+            safeTransition(taskName, TaskStatus.RUNNING);
 
             if (fallbackSupplier == null) {
-                log.warn("Task [{}] has no fallback registered, returning null to caller", taskName);
-                stateMachine.transition(taskName, TaskStatus.FAILED);
+                // 没有注册降级策略：不编造默认值，如实返回 null 并给出明确告警
+                log.warn("Task [{}] retries exhausted and no fallback strategy was registered, "
+                        + "returning null (degradation unavailable): {}", taskName, e.getMessage());
+                safeTransition(taskName, TaskStatus.FAILED);
                 return null;
             }
 
@@ -190,12 +193,20 @@ public class HarnessRuntime {
             if (fallbackResult != null) {
                 log.info("Task [{}] recovered via fallback in {}ms",
                         taskName, System.currentTimeMillis() - fallbackStart);
-                stateMachine.transition(taskName, TaskStatus.COMPLETED);
+                safeTransition(taskName, TaskStatus.COMPLETED);
             } else {
                 log.warn("Task [{}] fallback returned no usable result", taskName);
-                stateMachine.transition(taskName, TaskStatus.FAILED);
+                safeTransition(taskName, TaskStatus.FAILED);
             }
             return fallbackResult;
+        } finally {
+            // 到达终态（COMPLETED / FAILED）后清理状态记录，避免状态表随任务数无界增长。
+            // remove 幂等：key 不存在时静默返回；清理属埋点，失败绝不影响主流程。
+            try {
+                stateMachine.remove(taskName);
+            } catch (Exception cleanupEx) {
+                log.debug("State cleanup for task [{}] failed (ignored): {}", taskName, cleanupEx.getMessage());
+            }
         }
     }
 
@@ -271,6 +282,44 @@ public class HarnessRuntime {
         } catch (Exception e) {
             future.cancel(true);
             throw e;
+        }
+    }
+
+    /**
+     * 驱动状态机进入重试路径：RUNNING → FAILED → RETRYING → RUNNING。
+     * <p>
+     * 由 {@link RetryPolicy#executeWithRetry(Supplier, RetryPolicy, java.util.function.IntConsumer)}
+     * 在「决定重试、尚未发起下一次」之前回调。整个回调是纯观测埋点：
+     * 任何状态机异常都被吞掉，绝不影响重试本身。
+     *
+     * @param taskName       任务名称
+     * @param failedAttempts 当前已失败的次数（仅用于日志）
+     */
+    private void onRetrying(String taskName, int failedAttempts) {
+        try {
+            log.debug("Task [{}] attempt {} failed, signalling RETRYING to state machine",
+                    taskName, failedAttempts);
+            safeTransition(taskName, TaskStatus.FAILED);
+            safeTransition(taskName, TaskStatus.RETRYING);
+            safeTransition(taskName, TaskStatus.RUNNING);
+        } catch (Exception e) {
+            log.debug("Retry state-machine signalling failed for task [{}] (ignored): {}",
+                    taskName, e.getMessage());
+        }
+    }
+
+    /**
+     * 安全状态转移：状态机是观测埋点，任何异常都不得抛给调用方、影响主流程。
+     *
+     * @param taskName    任务名称
+     * @param targetState 目标状态
+     */
+    private void safeTransition(String taskName, TaskStatus targetState) {
+        try {
+            stateMachine.transition(taskName, targetState);
+        } catch (Exception e) {
+            log.debug("State transition for task [{}] to {} failed (ignored): {}",
+                    taskName, targetState, e.getMessage());
         }
     }
 }

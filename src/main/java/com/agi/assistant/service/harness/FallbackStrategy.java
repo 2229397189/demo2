@@ -3,6 +3,7 @@ package com.agi.assistant.service.harness;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.function.Supplier;
 
 /**
@@ -81,5 +82,62 @@ public class FallbackStrategy {
             log.error("Task [{}] failed with graceful degradation: {}", taskName, e.getMessage(), e);
             return degradedResult;
         }
+    }
+
+    /**
+     * 执行多级降级链。
+     * <p>
+     * 语义：先试 {@code primary}；一旦抛出异常，则<b>按顺序</b>依次尝试 {@code tiers}
+     * 中的每一项，命中第一个成功者即返回。全部失败时返回 {@code null} 并记录
+     * {@code log.warn}（携带 taskName 与最后一次异常）—— <b>绝不返回编造的默认对象</b>，
+     * 由调用方自行决定如何处置「无可用结果」。
+     * <p>
+     * 每一层的成功 / 失败都会以 {@code log.debug}/{@code log.warn} 记录，便于事后追溯
+     * 降级链到底走到了哪一层。
+     *
+     * @param primary  主供应商（第一层）
+     * @param tiers    备用供应商标（第二层及以后），按顺序尝试；可为 null 或空
+     * @param taskName 任务名，用于日志定位
+     * @param <T>      返回值类型
+     * @return 第一个成功的结果；全部失败返回 null
+     */
+    public <T> T executeChain(Supplier<T> primary, List<Supplier<T>> tiers, String taskName) {
+        Exception lastException = null;
+
+        // 第一层：主供应商
+        try {
+            T result = primary.get();
+            log.debug("FallbackChain [{}] primary supplier succeeded", taskName);
+            return result;
+        } catch (Exception e) {
+            lastException = e;
+            log.warn("FallbackChain [{}] primary supplier failed: {}", taskName, e.getMessage());
+        }
+
+        // 第二层及以后：按顺序尝试备用供应商标
+        int tierCount = (tiers == null) ? 0 : tiers.size();
+        for (int i = 0; i < tierCount; i++) {
+            Supplier<T> tier = tiers.get(i);
+            if (tier == null) {
+                log.debug("FallbackChain [{}] fallback tier {} of {} is null, skipping",
+                        taskName, i + 1, tierCount);
+                continue;
+            }
+            try {
+                T result = tier.get();
+                log.info("FallbackChain [{}] recovered at fallback tier {} of {}",
+                        taskName, i + 1, tierCount);
+                return result;
+            } catch (Exception e) {
+                lastException = e;
+                log.warn("FallbackChain [{}] fallback tier {} of {} failed: {}",
+                        taskName, i + 1, tierCount, e.getMessage());
+            }
+        }
+
+        log.warn("FallbackChain [{}] all {} fallback tier(s) exhausted, returning null "
+                        + "(no fabricated result). lastError={}",
+                taskName, tierCount, lastException == null ? "n/a" : lastException.getMessage());
+        return null;
     }
 }
