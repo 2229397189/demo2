@@ -23,6 +23,7 @@ import com.agi.assistant.model.enums.ToolRiskLevel;
 import com.agi.assistant.service.agent.ReactEngine;
 import com.agi.assistant.service.agent.RaceStrategy;
 import com.agi.assistant.service.harness.HarnessRuntime;
+import com.agi.assistant.service.harness.ChatFallbackProvider;
 import com.agi.assistant.model.enums.RetrievalStrategy;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -48,6 +49,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
@@ -83,6 +85,7 @@ public class ChatServiceImpl implements ChatService {
     private final ReactEngine reactEngine;
     private final RaceStrategy raceStrategy;
     private final HarnessRuntime harnessRuntime;
+    private final ChatFallbackProvider chatFallbackProvider;
     private final AuditService auditService;
 
     @Value("classpath:prompts/system-prompt.md")
@@ -147,6 +150,7 @@ public class ChatServiceImpl implements ChatService {
                            ReactEngine reactEngine,
                            RaceStrategy raceStrategy,
                            HarnessRuntime harnessRuntime,
+                           ChatFallbackProvider chatFallbackProvider,
                            @Lazy AuditService auditService) {
         this.chatSessionMapper = chatSessionMapper;
         this.chatMessageMapper = chatMessageMapper;
@@ -163,6 +167,7 @@ public class ChatServiceImpl implements ChatService {
         this.reactEngine = reactEngine;
         this.raceStrategy = raceStrategy;
         this.harnessRuntime = harnessRuntime;
+        this.chatFallbackProvider = chatFallbackProvider;
         this.auditService = auditService;
     }
 
@@ -222,20 +227,38 @@ public class ChatServiceImpl implements ChatService {
             sendThinkingEvent(emitter, "retrieval", "正在多路竞速检索知识库...");
 
             // 使用 RaceStrategy 竞速多种检索策略
-            searchResults = harnessRuntime.execute(() -> {
-                if ("RACE".equalsIgnoreCase(strategy)) {
-                    // 竞速模式：DENSE / SPARSE / GRAPH 三路竞赛，取最快返回
-                    List<RetrievalStrategy> strategies = List.of(
-                            com.agi.assistant.model.enums.RetrievalStrategy.DENSE,
-                            com.agi.assistant.model.enums.RetrievalStrategy.SPARSE,
-                            com.agi.assistant.model.enums.RetrievalStrategy.GRAPH
-                    );
-                    return raceStrategy.raceRetrieve(strategies, request.getMessage());
-                } else {
-                    // 指定策略模式，带超时重试保障
-                    return hybridRetrievalService.retrieve(request.getMessage(), strategy, 5);
-                }
-            }, "rag-retrieval", 5000);
+            //
+            // 修复（并发状态机冲突 + SSE 击穿）：
+            // 1) taskName 原为固定常量 "rag-retrieval"，而 HarnessRuntime 用它作 StateMachine
+            //    的 key —— 多请求并发时共享同一 key、互相 reset / 推进状态，触发状态机非法
+            //    转移。现改用请求级唯一的 taskKey(...) 隔离。
+            // 2) 本处是四处 execute 调用里唯一没有 try 包裹的一处：一旦抛异常会直接击穿 SSE
+            //    输出流，用户侧表现为对话突然中断。现在捕获后降级为空结果集，保证用户仍能
+            //    拿到完整的 LLM 回答（只是缺少引用来源）。
+            boolean retrievalDegraded = false;
+            try {
+                searchResults = harnessRuntime.execute(() -> {
+                    if ("RACE".equalsIgnoreCase(strategy)) {
+                        // 竞速模式：DENSE / SPARSE / GRAPH 三路竞赛，取最快返回
+                        List<RetrievalStrategy> strategies = List.of(
+                                com.agi.assistant.model.enums.RetrievalStrategy.DENSE,
+                                com.agi.assistant.model.enums.RetrievalStrategy.SPARSE,
+                                com.agi.assistant.model.enums.RetrievalStrategy.GRAPH
+                        );
+                        return raceStrategy.raceRetrieve(strategies, request.getMessage());
+                    } else {
+                        // 指定策略模式，带超时重试保障
+                        return hybridRetrievalService.retrieve(request.getMessage(), strategy, 5);
+                    }
+                }, taskKey("rag-retrieval", String.valueOf(sessionId)), 5000,
+                        // 真实降级：检索失败后先查进程内缓存，仍未命中则退化为空结果集，
+                        // 绝不把「检索失败」升级成「整条对话失败」。
+                        () -> asSearchResults(chatFallbackProvider.retrievalFallback(request.getMessage())));
+            } catch (Exception e) {
+                log.warn("RAG retrieval failed, degrading to empty result set: {}", e.getMessage());
+                searchResults = new ArrayList<>();
+                retrievalDegraded = true;
+            }
 
             if (searchResults != null && !searchResults.isEmpty()) {
                 Map<String, Object> sourceData = new HashMap<>();
@@ -246,7 +269,8 @@ public class ChatServiceImpl implements ChatService {
                         "检索到 " + searchResults.size() + " 条相关内容");
             } else {
                 searchResults = new ArrayList<>();
-                sendThinkingEvent(emitter, "retrieval_done", "检索超时或无结果，继续生成回答");
+                sendThinkingEvent(emitter, "retrieval_done",
+                        retrievalDegraded ? "检索已降级，继续生成回答" : "检索超时或无结果，继续生成回答");
             }
 
             // 4. Web search（条件触发 + HarnessRuntime 超时保障）
@@ -256,7 +280,8 @@ public class ChatServiceImpl implements ChatService {
                 try {
                     webResults = harnessRuntime.execute(() ->
                                     webSearchService.search(request.getMessage(), 5),
-                            "web-search", 10000);
+                            taskKey("web-search", String.valueOf(sessionId)), 10000,
+                            () -> asSearchResults(chatFallbackProvider.webSearchFallback(request.getMessage())));
                     if (webResults != null && !webResults.isEmpty()) {
                         Map<String, Object> webData = new HashMap<>();
                         webData.put("type", "websearch");
@@ -279,7 +304,9 @@ public class ChatServiceImpl implements ChatService {
                     context = harnessRuntime.execute(() ->
                                     contextAssembly.assembleContext(userId, sessionId.toString(),
                                             request.getMessage()),
-                            "memory-assembly", 5000);
+                            taskKey("memory-assembly", String.valueOf(sessionId)), 5000,
+                            () -> chatFallbackProvider.memoryFallback(userId, sessionId.toString(),
+                                    request.getMessage()));
                     sendThinkingEvent(emitter, "memory_done", "记忆查询完成");
                 } catch (Exception e) {
                     log.warn("Memory assembly failed or timed out: {}", e.getMessage());
@@ -297,10 +324,10 @@ public class ChatServiceImpl implements ChatService {
                     String reactAnswer = harnessRuntime.execute(() ->
                                     reactEngine.run(request.getMessage(), 5, reactUserId,
                                             sessionId.toString()),
-                            "react-engine", 60000,
+                            taskKey("react-engine", String.valueOf(sessionId)), 60000,
                             // 真正的降级：ReAct 失败时返回空串，走下面的普通流式回答，
                             // 而不是像以前那样只演戏式地返回 null
-                            () -> "");
+                            () -> chatFallbackProvider.reactFallback());
 
                     if (reactAnswer != null && !reactAnswer.isBlank()
                             && !reactAnswer.startsWith("经过多轮推理")) {
@@ -820,6 +847,55 @@ public class ChatServiceImpl implements ChatService {
     private String truncate(String text, int maxLen) {
         if (text == null) return "New Chat";
         return text.length() > maxLen ? text.substring(0, maxLen) + "..." : text;
+    }
+
+    /**
+     * 生成<b>请求级唯一</b>的 Harness 任务名。
+     * <p>
+     * 背景：{@link HarnessRuntime} 以 taskName 作为
+     * {@link com.agi.assistant.service.harness.StateMachine} 的 key，每次 {@code execute}
+     * 都会先 {@code reset} 再 {@code transition}。若 taskName 是固定常量（如
+     * {@code "rag-retrieval"}），并发请求会共享同一 key、互相把对方的状态重置 / 推进，
+     * 触发状态机非法转移。
+     * <p>
+     * 之所以不能只用 {@code base + sessionId}：同一会话内并发发两条消息时 sessionId 相同，
+     * 仍会撞车。因此追加一个请求级 UUID，保证「同一会话并发请求」也彼此隔离；sessionId
+     * 缺失时由 UUID 兜底。
+     * <p>
+     * 可见性设为 package-private 且为 static：便于单测在不构造整个 {@code ChatServiceImpl}
+     * 的前提下直接验证 key 的唯一性。
+     *
+     * @param base      任务基础名（如 {@code "rag-retrieval"}）
+     * @param sessionId 会话 ID，可为 null
+     * @return 形如 {@code base#sessionId#uuid} 的请求级唯一 taskName
+     */
+    static String taskKey(String base, String sessionId) {
+        String sid = (sessionId == null || sessionId.isBlank()) ? "no-session" : sessionId;
+        return base + "#" + sid + "#" + UUID.randomUUID();
+    }
+
+    /**
+     * 把降级供应商返回的 {@code List<?>} 适配成调用点期望的 {@code List<SearchResult>}。
+     * <p>
+     * {@link ChatFallbackProvider} 的检索降级统一返回 {@code List<Object>}（因为它同时服务
+     * 检索与联网搜索两条路），而本类的 execute 调用点需要 {@code List<SearchResult>}。这里
+     * 只做<b>类型层面的适配</b>：筛选出 {@link SearchResult} 元素，不改变降级语义，也绝不
+     * 编造数据。返回结果永不为 null（最差为空列表），以便 HarnessRuntime 将降级判定为成功。
+     *
+     * @param raw 降级供应商返回的原始列表，可为 null
+     * @return 适配后的 {@code List<SearchResult>}；无匹配元素时为空列表
+     */
+    private static List<SearchResult> asSearchResults(List<?> raw) {
+        List<SearchResult> adapted = new ArrayList<>();
+        if (raw == null) {
+            return adapted;
+        }
+        for (Object item : raw) {
+            if (item instanceof SearchResult sr) {
+                adapted.add(sr);
+            }
+        }
+        return adapted;
     }
 
     /**
