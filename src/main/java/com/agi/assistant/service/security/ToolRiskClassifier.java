@@ -47,6 +47,33 @@ public class ToolRiskClassifier {
             "cmd|powershell|/bin/bash|/bin/sh|rm\\s+-rf|wget\\s|curl\\s.*\\|\\s*sh)"
     );
 
+    /**
+     * 高置信度危险参数模式：命中即 BLOCK（而不是仅仅升级为 WARN）。
+     * <p>
+     * 与 {@link #DANGEROUS_PARAM_PATTERNS} 的区别：这里的特征几乎不可能是正常业务参数，
+     * 因此不适用于「抬一档 WARN 继续放行」的宽松策略，必须直接阻断：
+     * <ul>
+     *   <li>{@code rm -rf} —— 递归强制删除</li>
+     *   <li>{@code drop table} —— 删表</li>
+     *   <li>{@code curl ... | sh} / {@code wget ... | sh}（含 bash/zsh）—— 远程脚本直执行</li>
+     *   <li>{@code mkfs} —— 格式化文件系统</li>
+     *   <li>{@code dd if=} —— 裸设备写入</li>
+     *   <li>{@code chmod 777 /} —— 把根目录权限全开</li>
+     *   <li>{@code :(){ :|:& };:} —— fork 炸弹</li>
+     * </ul>
+     */
+    private static final Pattern HIGH_CONFIDENCE_DANGEROUS_PATTERNS = Pattern.compile(
+            "(?i)(" +
+            "rm\\s+-rf" +
+            "|drop\\s+table" +
+            "|(curl|wget)\\b[^|\\n]*\\|\\s*(sh|bash|zsh)\\b" +
+            "|mkfs(\\.\\w+)?" +
+            "|dd\\s+if=" +
+            "|chmod\\s+(-[A-Za-z]+\\s+)?777\\s+/" +
+            "|:\\(\\)\\s*\\{\\s*:\\|:&\\s*\\}\\s*;:" +
+            ")"
+    );
+
     /** 敏感数据模式：密钥、密码等 */
     private static final Pattern SENSITIVE_DATA_PATTERN = Pattern.compile(
             "(?i)(password|secret|token|api[_-]?key|private[_-]?key|credentials|" +
@@ -126,6 +153,16 @@ public class ToolRiskClassifier {
      * <p>
      * 用于已注册工具：基础风险由工具自己声明，本方法只负责在参数里
      * 发现注入/危险命令时把风险等级往上抬。
+     * <p>
+     * 分级规则：
+     * <ul>
+     *   <li>命中 {@link #HIGH_CONFIDENCE_DANGEROUS_PATTERNS}（rm -rf / drop table /
+     *       curl|sh / mkfs / dd if= / chmod 777 / fork 炸弹等）→ <b>BLOCK</b>；</li>
+     *   <li>否则命中较宽泛的 {@link #DANGEROUS_PARAM_PATTERNS} → WARN；</li>
+     *   <li>都不命中 → SAFE。</li>
+     * </ul>
+     * 变更说明：此前该方法把参数风险封顶在 WARN，导致 {@code ToolRegistry} 里
+     * 的 BLOCK 拦截分支在生产环境不可达；现在高置信度危险参数可直接升级为 BLOCK。
      *
      * @param params 工具参数
      * @return 参数侧的风险等级（无危险参数时返回 SAFE）
@@ -133,6 +170,10 @@ public class ToolRiskClassifier {
     public ToolRiskLevel classifyParamsOnly(String params) {
         if (params == null || params.isBlank()) {
             return ToolRiskLevel.SAFE;
+        }
+        if (hasHighConfidenceDangerousParams(params)) {
+            log.warn("Tool params contain high-confidence dangerous pattern, raising risk to BLOCK");
+            return ToolRiskLevel.BLOCK;
         }
         if (hasDangerousParams(params)) {
             log.warn("Tool params contain dangerous pattern, raising risk to WARN");
@@ -156,6 +197,16 @@ public class ToolRiskClassifier {
      */
     private boolean hasDangerousParams(String params) {
         return DANGEROUS_PARAM_PATTERNS.matcher(params).find();
+    }
+
+    /**
+     * 检查参数中是否包含高置信度的危险内容（命中即应 BLOCK）。
+     *
+     * @param params 工具参数
+     * @return true 表示包含高置信度危险特征
+     */
+    private boolean hasHighConfidenceDangerousParams(String params) {
+        return HIGH_CONFIDENCE_DANGEROUS_PATTERNS.matcher(params).find();
     }
 
     /**

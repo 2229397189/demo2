@@ -39,8 +39,13 @@ public class SandboxServiceImpl implements SandboxService {
     /**
      * 是否要求显式确认后才执行代码。
      * 默认 false：保持既有行为；生产建议开启。
+     * <p>
+     * 属性键对齐说明：application.yml 里该开关实际位于 {@code app.sandbox.require-confirm}，
+     * 而此前 @Value 读的是 {@code sandbox.require-confirm} —— 键不一致导致即便在 yml 里
+     * 打开开关，本服务也永远读到默认值 false，确认门槛形同虚设。现以 yml 的
+     * {@code app.sandbox.require-confirm} 为准，并回退兼容旧的 {@code sandbox.require-confirm}。
      */
-    @Value("${sandbox.require-confirm:false}")
+    @Value("${app.sandbox.require-confirm:${sandbox.require-confirm:false}}")
     private boolean requireConfirm;
 
     @Override

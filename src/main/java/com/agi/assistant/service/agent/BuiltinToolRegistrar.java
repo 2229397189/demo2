@@ -2,6 +2,7 @@ package com.agi.assistant.service.agent;
 
 import com.agi.assistant.model.dto.SandboxExecuteRequest;
 import com.agi.assistant.model.dto.SandboxExecuteResponse;
+import com.agi.assistant.model.dto.ToolResult;
 import com.agi.assistant.model.entity.SearchResult;
 import com.agi.assistant.model.enums.ToolRiskLevel;
 import com.agi.assistant.service.SandboxService;
@@ -16,7 +17,6 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -57,6 +57,7 @@ public class BuiltinToolRegistrar {
     private static final String P_CODE = "code";
     private static final String P_TIMEOUT = "timeout";
     private static final String P_EXPRESSION = "expression";
+    private static final String P_CONFIRMED = "confirmed";
 
     private static final int DEFAULT_TOP_K = 5;
 
@@ -96,8 +97,21 @@ public class BuiltinToolRegistrar {
     //  Tool implementations
     // ----------------------------------------------------------------
 
+    /**
+     * 强类型注册薄封装，委托到
+     * {@link ToolRegistry#registerTool(String, String, ToolRiskLevel, ToolHandler)}。
+     * <p>
+     * 存在此封装的原因：{@link ToolRegistry} 同时保留了旧的 {@code Function<Map,Map>}
+     * 重载与新的 {@link ToolHandler} 重载，二者形状相同，直接传隐式 lambda 会触发
+     * 重载歧义；这里先把 handler 显式定型为 {@link ToolHandler} 再转发，既消除歧义，
+     * 又明确表达「使用强类型 handler」的意图。
+     */
+    private void register(String name, String description, ToolRiskLevel riskLevel, ToolHandler handler) {
+        toolRegistry.registerTool(name, description, riskLevel, handler);
+    }
+
     private void registerKnowledgeSearch() {
-        toolRegistry.registerTool(
+        register(
                 "knowledge_search",
                 "在本地知识库中做混合检索（向量 + 关键词 + 图谱），返回最相关的文档片段。"
                         + "参数：query（检索词，必填）、topK（返回条数，默认 5）",
@@ -105,21 +119,20 @@ public class BuiltinToolRegistrar {
                 params -> {
                     String query = strParam(params, P_QUERY);
                     if (query == null || query.isBlank()) {
-                        return errorResult("missing required parameter: query");
+                        return ToolResult.failure("knowledge_search", "missing required parameter: query");
                     }
                     int topK = intParam(params, P_TOP_K, DEFAULT_TOP_K);
 
                     List<SearchResult> results = hybridRetrievalService.retrieve(query, "HYBRID", topK);
-                    Map<String, Object> result = new LinkedHashMap<>();
-                    result.put("result", formatSearchResults(results, query));
-                    result.put("count", results.size());
-                    result.put("items", toItemList(results));
-                    return result;
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("count", results.size());
+                    data.put("items", toItemList(results));
+                    return ToolResult.success("knowledge_search", formatSearchResults(results, query), data);
                 });
     }
 
     private void registerWebSearch() {
-        toolRegistry.registerTool(
+        register(
                 "web_search",
                 "联网搜索实时信息（新闻、天气、股价、最新动态等）。"
                         + "参数：query（检索词，必填）、topK（返回条数，默认 5）",
@@ -127,21 +140,20 @@ public class BuiltinToolRegistrar {
                 params -> {
                     String query = strParam(params, P_QUERY);
                     if (query == null || query.isBlank()) {
-                        return errorResult("missing required parameter: query");
+                        return ToolResult.failure("web_search", "missing required parameter: query");
                     }
                     int topK = intParam(params, P_TOP_K, DEFAULT_TOP_K);
 
                     List<SearchResult> results = webSearchService.search(query, topK);
-                    Map<String, Object> result = new LinkedHashMap<>();
-                    result.put("result", formatSearchResults(results, query));
-                    result.put("count", results.size());
-                    result.put("items", toItemList(results));
-                    return result;
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("count", results.size());
+                    data.put("items", toItemList(results));
+                    return ToolResult.success("web_search", formatSearchResults(results, query), data);
                 });
     }
 
     private void registerMemorySearch() {
-        toolRegistry.registerTool(
+        register(
                 "memory_search",
                 "检索用户的长期记忆（偏好、习惯、已知事实）。"
                         + "参数：query（检索词，必填）、userId（用户 ID，必填）、topK（返回条数，默认 5）",
@@ -150,10 +162,10 @@ public class BuiltinToolRegistrar {
                     String query = strParam(params, P_QUERY);
                     Long userId = longParam(params, P_USER_ID);
                     if (query == null || query.isBlank()) {
-                        return errorResult("missing required parameter: query");
+                        return ToolResult.failure("memory_search", "missing required parameter: query");
                     }
                     if (userId == null) {
-                        return errorResult("missing required parameter: userId");
+                        return ToolResult.failure("memory_search", "missing required parameter: userId");
                     }
                     int topK = intParam(params, P_TOP_K, DEFAULT_TOP_K);
 
@@ -168,16 +180,15 @@ public class BuiltinToolRegistrar {
                         }
                     }
 
-                    Map<String, Object> result = new LinkedHashMap<>();
-                    result.put("result", sb.toString());
-                    result.put("count", memories.size());
-                    result.put("items", memories);
-                    return result;
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("count", memories.size());
+                    data.put("items", memories);
+                    return ToolResult.success("memory_search", sb.toString(), data);
                 });
     }
 
     private void registerCurrentTime() {
-        toolRegistry.registerTool(
+        register(
                 "current_time",
                 "获取服务器当前日期时间与星期。参数：无",
                 ToolRiskLevel.SAFE,
@@ -195,36 +206,34 @@ public class BuiltinToolRegistrar {
                                 case SUNDAY -> "星期日";
                             } + "）";
 
-                    Map<String, Object> result = new LinkedHashMap<>();
-                    result.put("result", text);
-                    result.put("iso", now.toString());
-                    return result;
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("iso", now.toString());
+                    return ToolResult.success("current_time", text, data);
                 });
     }
 
     private void registerCalculate() {
-        toolRegistry.registerTool(
+        register(
                 "calculate",
                 "计算四则运算表达式，支持 + - * / % 与括号。参数：expression（表达式，必填）",
                 ToolRiskLevel.SAFE,
                 params -> {
                     String expression = strParam(params, P_EXPRESSION);
                     if (expression == null || expression.isBlank()) {
-                        return errorResult("missing required parameter: expression");
+                        return ToolResult.failure("calculate", "missing required parameter: expression");
                     }
                     String sanitized = expression.replaceAll("[^0-9+\\-*/().%\\s]", "");
                     double value = new ArithmeticEvaluator(sanitized).evaluate();
 
-                    Map<String, Object> result = new LinkedHashMap<>();
-                    result.put("result", String.valueOf(value));
-                    result.put("value", value);
-                    result.put("expression", sanitized.trim());
-                    return result;
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("value", value);
+                    data.put("expression", sanitized.trim());
+                    return ToolResult.success("calculate", String.valueOf(value), data);
                 });
     }
 
     private void registerRunCode() {
-        toolRegistry.registerTool(
+        register(
                 "run_code",
                 "在隔离沙箱中执行代码并返回输出。"
                         + "参数：language（python/javascript/java，必填）、code（源码，必填）、timeout（秒，默认 30）",
@@ -233,23 +242,39 @@ public class BuiltinToolRegistrar {
                     String language = strParam(params, P_LANGUAGE);
                     String code = strParam(params, P_CODE);
                     if (language == null || language.isBlank()) {
-                        return errorResult("missing required parameter: language");
+                        return ToolResult.failure("run_code", "missing required parameter: language");
                     }
                     if (code == null || code.isBlank()) {
-                        return errorResult("missing required parameter: code");
+                        return ToolResult.failure("run_code", "missing required parameter: code");
                     }
                     int timeout = intParam(params, P_TIMEOUT, 30);
+
+                    // 确认门槛：确认状态从入参读取，绝不由工具侧硬编码为 true。
+                    // 修复前这里写死 setConfirmed(true)，等于架空了 sandbox.require-confirm：
+                    // 任何 LLM 生成的 run_code 调用都会绕过确认直接执行沙箱代码。
+                    // 现在只有调用方显式传入 confirmed=true 才会通过门槛。
+                    boolean confirmed = boolParam(params, P_CONFIRMED, false);
 
                     SandboxExecuteRequest request = new SandboxExecuteRequest();
                     request.setLanguage(normalizeLanguage(language));
                     request.setCode(code);
                     request.setTimeout(timeout);
-                    // 工具调用路径视为「已确认」：它已经过 ToolRegistry 的风险分级
-                    // （run_code=WARN）与审计；sandbox.require-confirm 只拦直连 API
-                    // 的未确认请求
-                    request.setConfirmed(true);
+                    request.setConfirmed(confirmed);
 
-                    SandboxExecuteResponse response = sandboxService.execute(request);
+                    SandboxExecuteResponse response;
+                    try {
+                        response = sandboxService.execute(request);
+                    } catch (IllegalArgumentException e) {
+                        // SandboxServiceImpl 的确认门槛拒绝：如实转成结构化失败，绝不吞掉、绝不自动确认
+                        log.warn("run_code rejected by sandbox confirmation gate: {}", e.getMessage());
+                        return ToolResult.failure("run_code",
+                                "沙箱执行被拒绝，需要用户确认后才能执行（请在参数中携带 confirmed=true）："
+                                        + e.getMessage());
+                    } catch (Exception e) {
+                        // 其它沙箱异常也结构化降级，不向上抛
+                        log.error("run_code sandbox execution failed: {}", e.getMessage(), e);
+                        return ToolResult.failure("run_code", "沙箱执行失败：" + e.getMessage());
+                    }
 
                     StringBuilder sb = new StringBuilder();
                     if (response.getOutput() != null && !response.getOutput().isBlank()) {
@@ -265,12 +290,11 @@ public class BuiltinToolRegistrar {
                         sb.append("(无输出)");
                     }
 
-                    Map<String, Object> result = new LinkedHashMap<>();
-                    result.put("result", sb.toString());
-                    result.put("exitCode", response.getExitCode());
-                    result.put("executionTime", response.getExecutionTime());
-                    result.put("language", request.getLanguage());
-                    return result;
+                    Map<String, Object> data = new LinkedHashMap<>();
+                    data.put("exitCode", response.getExitCode());
+                    data.put("executionTime", response.getExecutionTime());
+                    data.put("language", request.getLanguage());
+                    return ToolResult.success("run_code", sb.toString(), data);
                 });
     }
 
@@ -326,10 +350,43 @@ public class BuiltinToolRegistrar {
         };
     }
 
-    private Map<String, Object> errorResult(String message) {
-        Map<String, Object> result = new HashMap<>();
-        result.put("error", message);
-        return result;
+    /**
+     * Robustly parse a boolean parameter.
+     * <p>
+     * Accepts {@link Boolean} values and case-insensitive {@code "true"}/{@code "false"}
+     * strings (trimmed); numbers are treated as {@code != 0}. Any other value — including
+     * {@code null} — falls back to {@code defaultValue}. Callers pass {@code false} for the
+     * sandbox confirmation flag, so malformed input is treated as "not confirmed".
+     *
+     * @param params       parameter map, may be null
+     * @param key          parameter key
+     * @param defaultValue value returned when the parameter is absent or unparseable
+     * @return parsed boolean
+     */
+    private boolean boolParam(Map<String, Object> params, String key, boolean defaultValue) {
+        if (params == null) {
+            return defaultValue;
+        }
+        Object value = params.get(key);
+        if (value == null) {
+            return defaultValue;
+        }
+        if (value instanceof Boolean b) {
+            return b;
+        }
+        if (value instanceof Number n) {
+            return n.intValue() != 0;
+        }
+        if (value instanceof String s) {
+            String trimmed = s.trim();
+            if ("true".equalsIgnoreCase(trimmed)) {
+                return true;
+            }
+            if ("false".equalsIgnoreCase(trimmed)) {
+                return false;
+            }
+        }
+        return defaultValue;
     }
 
     private String strParam(Map<String, Object> params, String key) {
