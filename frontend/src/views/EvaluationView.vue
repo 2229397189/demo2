@@ -23,7 +23,12 @@
 
       <el-table :data="evaluationStore.tasks" v-loading="evaluationStore.isLoading" stripe>
         <el-table-column prop="name" label="任务名称" min-width="150" />
-        <el-table-column prop="datasetName" label="数据集" width="120" />
+        <el-table-column prop="datasetId" label="数据集" width="150" show-overflow-tooltip />
+        <el-table-column prop="retrievalStrategy" label="检索策略" width="110">
+          <template #default="{ row }">
+            {{ row.retrievalStrategy || '-' }}
+          </template>
+        </el-table-column>
         <el-table-column prop="status" label="状态" width="100">
           <template #default="{ row }">
             <el-tag :type="getStatusType(row.status)" size="small">
@@ -31,11 +36,9 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="指标" min-width="200">
+        <el-table-column label="进度" width="110">
           <template #default="{ row }">
-            <el-tag v-for="metric in row.metrics" :key="metric" size="small" class="metric-tag">
-              {{ metric }}
-            </el-tag>
+            {{ row.completedQueries }} / {{ row.totalQueries }}
           </template>
         </el-table-column>
         <el-table-column label="创建时间" width="160">
@@ -129,11 +132,8 @@
         <!-- 指标柱状图 -->
         <div class="chart-container">
           <h4>指标可视化</h4>
-          <MetricsChart
-            :data="evaluationStore.comparison.metrics"
-            :labels="evaluationStore.comparison.taskNames"
-            :metrics="Object.keys(evaluationStore.comparison.metrics)"
-          />
+          <MetricsChart :labels="comparisonLabels" :rows="comparisonRows" />
+          <p v-if="comparisonRows.length === 0" class="chart-empty">暂无可视化指标</p>
         </div>
 
         <!-- 原始 JSON（可折叠） -->
@@ -187,7 +187,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   Plus,
@@ -203,6 +203,7 @@ import * as evaluationApi from '@/api/evaluation'
 import ComparisonTable from '@/components/evaluation/ComparisonTable.vue'
 import MetricsChart from '@/components/evaluation/MetricsChart.vue'
 import type { EvaluationTask } from '@/types'
+import { buildComparisonRows } from '@/utils/evaluation'
 import dayjs from 'dayjs'
 
 const evaluationStore = useEvaluationStore()
@@ -216,6 +217,16 @@ const datasets = ref<Array<{ datasetId: string; queryCount: number }>>([])
 const runningId = ref<string | null>(null)
 // 轮询定时器：任务运行中时定时刷新任务列表
 let pollTimer: number | null = null
+
+// 对比结果 → 可渲染的指标行 / 两侧任务名（供表格与图表共用）
+const comparisonRows = computed(() =>
+  evaluationStore.comparison ? buildComparisonRows(evaluationStore.comparison) : []
+)
+const comparisonLabels = computed(() =>
+  evaluationStore.comparison
+    ? [evaluationStore.comparison.taskA.name, evaluationStore.comparison.taskB.name]
+    : []
+)
 
 const newTask = ref({
   name: '',
@@ -505,5 +516,11 @@ onUnmounted(() => {
   margin: 0 0 12px;
   font-size: 14px;
   color: var(--color-text-primary);
+}
+
+.chart-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-tertiary);
 }
 </style>

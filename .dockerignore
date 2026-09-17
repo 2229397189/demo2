@@ -1,0 +1,14 @@
+# 后端构建上下文忽略
+target/
+.git/
+.idea/
+*.iml
+.vscode/
+frontend/
+docs/
+*.log
+.env
+.workbuddy/
+BOOT-INF/
+uploads/
+!uploads/.gitkeep

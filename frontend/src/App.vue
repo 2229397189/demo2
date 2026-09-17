@@ -1,5 +1,6 @@
 <template>
-  <el-container class="app-layout">
+  <router-view v-if="isBlankLayout" />
+  <el-container v-else class="app-layout">
     <!-- 侧边栏 - 学习 ChatGPT 的简洁设计 -->
     <el-aside :width="isCollapsed ? '64px' : '260px'" class="app-sidebar sidebar-transition" :class="{ 'mobile-open': mobileMenuOpen }">
       <!-- Logo 区域 -->
@@ -36,6 +37,25 @@
 
       <!-- 底部工具栏 -->
       <div class="sidebar-footer">
+        <!-- 当前用户 / 登录入口 -->
+        <div class="footer-user" v-if="authStore.user">
+          <el-icon :size="16"><User /></el-icon>
+          <span class="footer-username" :title="authStore.user.username">
+            {{ authStore.user.nickname || authStore.user.username }}
+          </span>
+          <el-tooltip content="退出登录" placement="right" :disabled="!isCollapsed">
+            <button class="icon-btn" @click="handleLogout">
+              <el-icon :size="16"><SwitchButton /></el-icon>
+            </button>
+          </el-tooltip>
+        </div>
+        <div class="footer-user" v-else>
+          <el-icon :size="16"><User /></el-icon>
+          <span class="footer-username">未登录</span>
+          <button class="icon-btn" title="去登录" @click="goLogin">
+            <el-icon :size="16"><SwitchButton /></el-icon>
+          </button>
+        </div>
         <div class="footer-actions">
           <ThemeToggle />
           <el-tooltip content="设置" placement="right" :disabled="!isCollapsed">
@@ -86,7 +106,8 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import {
   ChatDotRound,
   Document,
@@ -95,13 +116,31 @@ import {
   Cpu,
   Setting,
   Operation,
+  User,
+  SwitchButton,
 } from '@element-plus/icons-vue'
 import ThemeToggle from '@/components/common/ThemeToggle.vue'
+import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
+const router = useRouter()
+const authStore = useAuthStore()
 const isCollapsed = ref(localStorage.getItem('sidebar-collapsed') === 'true')
 const showSettings = ref(false)
 const mobileMenuOpen = ref(false)
+
+// 空白布局（如登录页）：隐藏侧边栏，让页面独占整屏
+const isBlankLayout = computed(() => (route.meta.layout as string) === 'blank')
+
+async function handleLogout() {
+  await authStore.logout()
+  ElMessage.success('已退出登录')
+  router.push('/login')
+}
+
+function goLogin() {
+  router.push('/login')
+}
 
 // 监听折叠状态变化并持久化
 watch(isCollapsed, (val) => {
@@ -262,6 +301,25 @@ const isActive = (path: string) => {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+.footer-user {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+}
+
+.footer-username {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .footer-actions {

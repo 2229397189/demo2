@@ -97,6 +97,46 @@
   --z-tooltip: 1070;
 }
 
+/* ============================================
+   Element Plus 主题映射
+   把 EP 组件对齐到项目品牌 token，消除「EP 默认蓝 (#409EFF)」与
+   品牌色 (#6366f1) 割裂。本文件在 main.ts 中于 EP 样式之后加载，
+   因此能覆盖 EP 的默认值。
+   `html[data-theme='dark']` 用于压过 EP dark 主题里 `html.dark` 的
+   同名变量（同特异性、靠加载顺序取胜）。
+   ============================================ */
+:root,
+html[data-theme='dark'] {
+  /* 品牌主色的完整色阶（light-x 用 color-mix 从主色派生，随主题自适应） */
+  --el-color-primary: var(--color-primary);
+  --el-color-primary-light-3: color-mix(in srgb, var(--color-primary) 70%, var(--color-bg-primary));
+  --el-color-primary-light-5: color-mix(in srgb, var(--color-primary) 50%, var(--color-bg-primary));
+  --el-color-primary-light-7: color-mix(in srgb, var(--color-primary) 30%, var(--color-bg-primary));
+  --el-color-primary-light-8: color-mix(in srgb, var(--color-primary) 20%, var(--color-bg-primary));
+  --el-color-primary-light-9: color-mix(in srgb, var(--color-primary) 10%, var(--color-bg-primary));
+  --el-color-primary-dark-2: color-mix(in srgb, var(--color-primary) 80%, #000000);
+
+  /* 功能色 */
+  --el-color-success: var(--color-success);
+  --el-color-warning: var(--color-warning);
+  --el-color-danger: var(--color-danger);
+  --el-color-error: var(--color-danger);
+  --el-color-info: var(--color-info);
+
+  /* 圆角 / 字体 / 文本 / 边框 */
+  --el-border-radius-base: var(--radius-md);
+  --el-border-radius-small: var(--radius-sm);
+  --el-border-radius-round: var(--radius-full);
+  --el-font-family: var(--font-sans);
+  --el-text-color-primary: var(--color-text-primary);
+  --el-text-color-regular: var(--color-text-secondary);
+  --el-border-color: var(--color-border);
+  --el-border-color-light: var(--color-border-light);
+  --el-bg-color: var(--color-bg-primary);
+  --el-bg-color-overlay: var(--color-bg-elevated);
+  --el-fill-color-blank: var(--color-bg-primary);
+}
+
 /* ── 暗色主题 ── */
 [data-theme='dark'] {
   --color-text-primary: #f1f5f9;

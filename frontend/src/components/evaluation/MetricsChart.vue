@@ -6,11 +6,13 @@
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import * as echarts from 'echarts'
 import type { EChartsType } from 'echarts'
+import type { ComparisonMetricRow } from '@/utils/evaluation'
 
 const props = defineProps<{
-  data: Record<string, number[]>
+  /** 两个任务的名字，顺序为 [A, B] */
   labels: string[]
-  metrics: string[]
+  /** 由 buildComparisonRows 生成的行 */
+  rows: ComparisonMetricRow[]
 }>()
 
 const chartRef = ref<HTMLElement>()
@@ -25,14 +27,9 @@ function initChart() {
 function updateChart() {
   if (!chart) return
 
-  const series = props.metrics.map((metric) => ({
-    name: metric,
-    type: 'bar' as const,
-    data: props.data[metric] || [],
-    itemStyle: {
-      borderRadius: [4, 4, 0, 0],
-    },
-  }))
+  const categories = props.rows.map((row) => row.label)
+  const seriesA = props.rows.map((row) => row.a)
+  const seriesB = props.rows.map((row) => row.b)
 
   chart.setOption({
     tooltip: {
@@ -40,22 +37,23 @@ function updateChart() {
       axisPointer: { type: 'shadow' },
     },
     legend: {
-      data: props.metrics,
+      data: props.labels,
       bottom: 0,
     },
     grid: {
       left: '3%',
       right: '4%',
-      bottom: '15%',
+      bottom: '18%',
       top: '10%',
       containLabel: true,
     },
     xAxis: {
       type: 'category',
-      data: props.labels,
+      data: categories,
       axisLabel: {
-        rotate: props.labels.length > 3 ? 30 : 0,
+        rotate: categories.length > 4 ? 25 : 0,
         fontSize: 11,
+        interval: 0,
       },
     },
     yAxis: {
@@ -64,11 +62,25 @@ function updateChart() {
         formatter: (value: number) => (value * 100).toFixed(0) + '%',
       },
     },
-    series,
+    series: [
+      {
+        name: props.labels[0] ?? 'A',
+        type: 'bar',
+        data: seriesA,
+        itemStyle: { borderRadius: [4, 4, 0, 0] },
+      },
+      {
+        name: props.labels[1] ?? 'B',
+        type: 'bar',
+        data: seriesB,
+        itemStyle: { borderRadius: [4, 4, 0, 0] },
+      },
+    ],
   })
 }
 
-watch(() => props.data, updateChart, { deep: true })
+watch(() => props.rows, updateChart, { deep: true })
+watch(() => props.labels, updateChart, { deep: true })
 
 onMounted(() => {
   initChart()

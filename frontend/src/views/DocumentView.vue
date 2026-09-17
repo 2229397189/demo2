@@ -9,12 +9,15 @@
 
     <!-- 上传区域 -->
     <div class="upload-section">
-      <div class="upload-card" :class="{ 'has-file': selectedFile }">
+      <div class="upload-card" :class="{ 'has-file': selectedFiles.length > 0 }">
         <el-upload
           ref="uploadRef"
           drag
+          multiple
           :auto-upload="false"
           :on-change="handleFileChange"
+          :on-remove="handleFileRemove"
+          :on-exceed="handleExceed"
           :before-upload="beforeUpload"
           accept=".pdf,.doc,.docx,.txt,.md,.html"
           :limit="5"
@@ -35,12 +38,15 @@
             type="primary"
             @click="handleUpload"
             :loading="uploading"
-            :disabled="!selectedFile"
+            :disabled="selectedFiles.length === 0"
             size="large"
           >
             <el-icon><Upload /></el-icon>
             上传文档
           </el-button>
+          <span v-if="selectedFiles.length > 0" class="selected-count">
+            已选择 {{ selectedFiles.length }} 个文件
+          </span>
         </div>
       </div>
     </div>
@@ -87,7 +93,7 @@
                   placement="top"
                 >
                   <el-tag :type="docStatusType(doc.status)" size="small" effect="light">
-                    <el-icon v-if="doc.status === 1" class="spin" :size="12"><Loading /></el-icon>
+                    <el-icon v-if="doc.status === DocumentStatus.PROCESSING" class="spin" :size="12"><Loading /></el-icon>
                     {{ docStatusLabel(doc.status) }}
                   </el-tag>
                 </el-tooltip>
@@ -102,7 +108,7 @@
                 size="small"
                 text
                 @click="handleProcess(doc)"
-                :disabled="doc.status === 1"
+                :disabled="doc.status === DocumentStatus.PROCESSING"
               >
                 <el-icon><VideoPlay /></el-icon>
                 处理
@@ -158,6 +164,7 @@ import {
 } from '@element-plus/icons-vue'
 import * as documentApi from '@/api/document'
 import type { Document as DocType } from '@/types'
+import { DocumentStatus } from '@/types'
 import SkeletonLoader from '@/components/common/SkeletonLoader.vue'
 import { formatFileSize, formatRelativeTime, documentStatusMap } from '@/utils/format'
 
@@ -170,7 +177,9 @@ const docStatusLabel = (status: number) => documentStatusMap[status]?.label || '
 const documents = ref<DocType[]>([])
 const loading = ref(false)
 const uploading = ref(false)
-const selectedFile = ref<File | null>(null)
+const uploadRef = ref<any>()
+// 多选上传：保存全部待上传文件（此前只存最后一个，导致多选时只传一个）
+const selectedFiles = ref<File[]>([])
 const currentPage = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
@@ -201,8 +210,23 @@ async function loadDocuments() {
   }
 }
 
-function handleFileChange(file: any) {
-  selectedFile.value = file.raw
+/** 同步 el-upload 的文件列表 → 待上传文件数组。 */
+function syncSelected(fileList: any[]) {
+  selectedFiles.value = (fileList || [])
+    .map((f) => f?.raw)
+    .filter((f): f is File => f instanceof File)
+}
+
+function handleFileChange(_file: any, fileList: any[]) {
+  syncSelected(fileList)
+}
+
+function handleFileRemove(_file: any, fileList: any[]) {
+  syncSelected(fileList)
+}
+
+function handleExceed() {
+  ElMessage.warning('一次最多上传 5 个文件')
 }
 
 function beforeUpload(file: File) {
@@ -214,19 +238,39 @@ function beforeUpload(file: File) {
   return true
 }
 
+/** 逐个上传全部选中文件，并汇总成功 / 失败数量。 */
 async function handleUpload() {
-  if (!selectedFile.value) return
+  const files = selectedFiles.value.slice()
+  if (files.length === 0) return
+
   uploading.value = true
-  try {
-    await documentApi.uploadDocument(selectedFile.value)
-    ElMessage.success('文档上传成功')
-    selectedFile.value = null
-    await loadDocuments()
-  } catch (error: any) {
-    ElMessage.error(error.message || '文档上传失败')
-  } finally {
-    uploading.value = false
+  let success = 0
+  const failed: string[] = []
+  for (const file of files) {
+    try {
+      await documentApi.uploadDocument(file)
+      success += 1
+    } catch {
+      // 单个文件的失败详情已由 utils/request.ts 弹出，这里只收集文件名用于汇总
+      failed.push(file.name)
+    }
   }
+  uploading.value = false
+
+  if (success > 0) {
+    ElMessage.success(
+      failed.length > 0
+        ? `成功上传 ${success} 个文件，${failed.length} 个失败`
+        : `成功上传 ${success} 个文件`
+    )
+  }
+  if (failed.length > 0) {
+    ElMessage.warning(`上传失败：${failed.join('、')}`)
+  }
+
+  selectedFiles.value = []
+  uploadRef.value?.clearFiles()
+  await loadDocuments()
 }
 
 async function handleProcess(doc: DocType) {
@@ -382,8 +426,15 @@ onMounted(() => {
 
 .upload-actions {
   display: flex;
+  align-items: center;
   justify-content: center;
+  gap: var(--space-3);
   margin-top: var(--space-4);
+}
+
+.selected-count {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
 }
 
 /* ── 文档列表 ── */

@@ -29,6 +29,7 @@
 <script setup lang="ts">
 import { Star } from '@element-plus/icons-vue'
 import type { Memory } from '@/types'
+import { getMemoryTypeLabel as getTypeLabel, getMemoryTypeTag as getTypeTag } from '@/utils/format'
 import dayjs from 'dayjs'
 
 defineProps<{
@@ -38,26 +39,6 @@ defineProps<{
 defineEmits<{
   select: [memory: Memory]
 }>()
-
-function getTypeTag(type: string) {
-  const map: Record<string, string> = {
-    fact: '',
-    preference: 'success',
-    interaction: 'warning',
-    summary: 'info',
-  }
-  return map[type] || ''
-}
-
-function getTypeLabel(type: string) {
-  const map: Record<string, string> = {
-    fact: '事实',
-    preference: '偏好',
-    interaction: '交互',
-    summary: '摘要',
-  }
-  return map[type] || type
-}
 
 function formatTime(date: string) {
   return dayjs(date).format('MM-DD HH:mm')

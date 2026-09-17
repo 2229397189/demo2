@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { EvaluationTask, EvaluationResult } from '@/types'
+import type { EvaluationTask, EvaluationResult, EvaluationComparison } from '@/types'
 import * as evaluationApi from '@/api/evaluation'
 
 function normalizeTask(raw: any): EvaluationTask {
@@ -39,7 +39,7 @@ export const useEvaluationStore = defineStore('evaluation', () => {
   const tasks = ref<EvaluationTask[]>([])
   const currentTask = ref<EvaluationTask | null>(null)
   const results = ref<EvaluationResult[]>([])
-  const comparison = ref<Record<string, unknown> | null>(null)
+  const comparison = ref<EvaluationComparison | null>(null)
   const isLoading = ref(false)
 
   async function loadTasks() {

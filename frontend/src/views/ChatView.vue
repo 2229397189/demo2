@@ -181,7 +181,6 @@ import {
   Memo,
   Cpu,
   Search,
-  Loading,
   Operation,
   VideoPause,
 } from '@element-plus/icons-vue'

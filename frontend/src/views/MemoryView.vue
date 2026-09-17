@@ -45,10 +45,11 @@
 
           <el-tabs v-model="memoryStore.activeType" @tab-change="handleTabChange">
             <el-tab-pane label="全部" name="all" />
-            <el-tab-pane label="事实" name="fact" />
-            <el-tab-pane label="偏好" name="preference" />
-            <el-tab-pane label="交互" name="interaction" />
-            <el-tab-pane label="摘要" name="summary" />
+            <el-tab-pane label="事实" name="FACT" />
+            <el-tab-pane label="偏好" name="PREFERENCE" />
+            <el-tab-pane label="知识" name="KNOWLEDGE" />
+            <el-tab-pane label="习惯" name="HABIT" />
+            <el-tab-pane label="摘要" name="SUMMARY" />
           </el-tabs>
 
           <!-- 列表视图 -->
@@ -102,6 +103,7 @@ import { useMemoryStore } from '@/stores/memory'
 import UserProfile from '@/components/memory/UserProfile.vue'
 import MemoryGraph from '@/components/memory/MemoryGraph.vue'
 import type { Memory } from '@/types'
+import { getMemoryTypeLabel as getTypeLabel, getMemoryTypeTag as getTypeTag } from '@/utils/format'
 import dayjs from 'dayjs'
 
 const memoryStore = useMemoryStore()
@@ -132,26 +134,6 @@ function handleTabChange(type: string | number) {
 
 function handleMemorySelect(memory: Memory) {
   ElMessage.info(`选中记忆: ${memory.content.substring(0, 50)}...`)
-}
-
-function getTypeTag(type: string) {
-  const map: Record<string, string> = {
-    fact: '',
-    preference: 'success',
-    interaction: 'warning',
-    summary: 'info',
-  }
-  return map[type] || ''
-}
-
-function getTypeLabel(type: string) {
-  const map: Record<string, string> = {
-    fact: '事实',
-    preference: '偏好',
-    interaction: '交互',
-    summary: '摘要',
-  }
-  return map[type] || type
 }
 
 function formatTime(date: string) {

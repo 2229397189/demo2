@@ -1,5 +1,5 @@
 import request from '@/utils/request'
-import type { Result, EvaluationTask, EvaluationResult } from '@/types'
+import type { Result, EvaluationTask, EvaluationResult, EvaluationComparison } from '@/types'
 
 export function createTask(task: {
   name: string
@@ -18,7 +18,8 @@ export function getResults(taskId: string): Promise<Result<EvaluationResult[]>> 
   return request.get(`/evaluation/tasks/${taskId}/results`)
 }
 
-export function compare(taskA: string, taskB: string): Promise<Result<Record<string, unknown>>> {
+// 返回后端 compareResults 的真实结构：{ taskA, taskB, metricsComparison }
+export function compare(taskA: string, taskB: string): Promise<Result<EvaluationComparison>> {
   return request.get('/evaluation/compare', { params: { taskA, taskB } })
 }
 

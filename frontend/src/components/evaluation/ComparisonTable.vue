@@ -1,66 +1,67 @@
 <template>
   <div class="comparison-table">
     <el-table :data="tableData" border stripe style="width: 100%">
-      <el-table-column prop="metric" label="指标" width="150" fixed />
-      <el-table-column
-        v-for="(taskName, index) in comparison.taskNames"
-        :key="index"
-        :label="taskName"
-        min-width="120"
-      >
+      <el-table-column prop="groupLabel" label="类别" width="90" fixed />
+      <el-table-column prop="label" label="指标" min-width="180" fixed />
+      <el-table-column :label="comparison.taskA.name" min-width="150">
         <template #default="{ row }">
-          <span :class="{ 'best-value': isBest(row.metric, index) }">
-            {{ formatValue(row.values[index]) }}
-          </span>
-          <el-icon v-if="isBest(row.metric, index)" class="best-icon"><Trophy /></el-icon>
+          <span :class="{ 'best-value': row.best === 'A' }">{{ formatMetric(row.a) }}</span>
+          <span v-if="row.a !== null" class="count-text">（{{ row.countA }} 样本）</span>
         </template>
       </el-table-column>
-      <el-table-column label="统计" min-width="200">
+      <el-table-column :label="comparison.taskB.name" min-width="150">
         <template #default="{ row }">
-          <span class="stat-text">
-            平均: {{ formatValue(row.avg) }} |
-            最小: {{ formatValue(row.min) }} |
-            最大: {{ formatValue(row.max) }}
-          </span>
+          <span :class="{ 'best-value': row.best === 'B' }">{{ formatMetric(row.b) }}</span>
+          <span v-if="row.b !== null" class="count-text">（{{ row.countB }} 样本）</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="差值 (B − A)" min-width="120">
+        <template #default="{ row }">
+          <span :class="deltaClass(row.delta)">{{ formatDelta(row.delta) }}</span>
         </template>
       </el-table-column>
     </el-table>
+
+    <p v-if="tableData.length === 0" class="empty-hint">
+      两个任务暂无可用指标（可能都还没运行，或指标全部未评估）。
+    </p>
+
+    <p class="note">
+      注：标注「未评估」表示该指标没有有效样本（后端以 null 返回，绝非 0 分）。
+    </p>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Trophy } from '@element-plus/icons-vue'
 import type { EvaluationComparison } from '@/types'
+import { buildComparisonRows, METRIC_GROUP_LABELS } from '@/utils/evaluation'
 
 const props = defineProps<{
   comparison: EvaluationComparison
 }>()
 
-const tableData = computed(() => {
-  return Object.keys(props.comparison.metrics).map(metric => {
-    const values = props.comparison.metrics[metric]
-    const summary = props.comparison.summary[metric]
-    return {
-      metric,
-      values,
-      avg: summary?.avg || 0,
-      min: summary?.min || 0,
-      max: summary?.max || 0,
-    }
-  })
-})
+const tableData = computed(() =>
+  buildComparisonRows(props.comparison).map((row) => ({
+    ...row,
+    groupLabel: METRIC_GROUP_LABELS[row.group],
+  }))
+)
 
-function isBest(metric: string, index: number): boolean {
-  const values = props.comparison.metrics[metric]
-  if (!values || values.length === 0) return false
-  const maxVal = Math.max(...values)
-  return values[index] === maxVal && values.filter(v => v === maxVal).length === 1
+function formatMetric(value: number | null): string {
+  if (value === null || value === undefined) return '未评估'
+  return (value * 100).toFixed(2) + '%'
 }
 
-function formatValue(value: number): string {
-  if (value === undefined || value === null) return '-'
-  return (value * 100).toFixed(2) + '%'
+function formatDelta(value: number | null): string {
+  if (value === null || value === undefined) return '-'
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${(value * 100).toFixed(2)}%`
+}
+
+function deltaClass(value: number | null): string {
+  if (value === null || value === undefined || value === 0) return ''
+  return value > 0 ? 'delta-up' : 'delta-down'
 }
 </script>
 
@@ -74,14 +75,31 @@ function formatValue(value: number): string {
   font-weight: 600;
 }
 
-.best-icon {
-  color: var(--color-warning);
+.count-text {
   margin-left: 4px;
-  vertical-align: middle;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
 }
 
-.stat-text {
+.delta-up {
+  color: var(--color-success);
+  font-weight: 600;
+}
+
+.delta-down {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.empty-hint {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+}
+
+.note {
+  margin: 8px 0 0;
   font-size: 12px;
-  color: var(--color-text-secondary);
+  color: var(--color-text-tertiary);
 }
 </style>

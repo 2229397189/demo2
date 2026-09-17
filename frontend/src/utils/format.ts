@@ -76,14 +76,15 @@ export function formatLatency(ms: number): string {
 }
 
 /**
- * 文档状态映射
+ * 文档状态映射（键为后端 DocumentStatus 的数字枚举：0/1/2/3/4）
  */
 export const documentStatusMap: Record<number, { label: string; type: string }> = {
   0: { label: '待处理', type: 'info' },
   1: { label: '处理中', type: 'warning' },
   2: { label: '已完成', type: 'success' },
   3: { label: '处理失败', type: 'danger' },
-  4: { label: '部分完成', type: 'warning' },
+  // 分块已落库、但至少一路索引（向量 / BM25 / 图谱）未建立 —— 语义见后端 DocumentStatus.PARTIAL
+  4: { label: '部分完成（部分索引未建立）', type: 'warning' },
 }
 
 /**
@@ -97,14 +98,26 @@ export const evaluationStatusMap: Record<number, { label: string; type: string }
 }
 
 /**
- * 记忆类型映射
+ * 记忆类型映射 —— 键为后端 / 前后端统一口径的 5 个大写 token：
+ * FACT / PREFERENCE / KNOWLEDGE / HABIT / SUMMARY。
+ * <p>MemoryView 与 MemoryGraph 共用此表，避免各写一份而逐渐漂移。</p>
  */
 export const memoryTypeMap: Record<string, { label: string; type: string }> = {
-  fact: { label: '事实', type: '' },
-  preference: { label: '偏好', type: 'success' },
-  interaction: { label: '交互', type: 'warning' },
-  summary: { label: '摘要', type: 'info' },
-  knowledge: { label: '知识', type: 'danger' },
+  FACT: { label: '事实', type: '' },
+  PREFERENCE: { label: '偏好', type: 'success' },
+  KNOWLEDGE: { label: '知识', type: 'danger' },
+  HABIT: { label: '习惯', type: 'warning' },
+  SUMMARY: { label: '摘要', type: 'info' },
+}
+
+/** 记忆类型的中文标签（未知类型原样返回）。 */
+export function getMemoryTypeLabel(type: string): string {
+  return memoryTypeMap[type]?.label || type
+}
+
+/** 记忆类型对应的 el-tag 类型（未知类型返回空串）。 */
+export function getMemoryTypeTag(type: string): string {
+  return memoryTypeMap[type]?.type || ''
 }
 
 /**

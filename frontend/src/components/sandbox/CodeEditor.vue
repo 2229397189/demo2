@@ -18,6 +18,9 @@ const emit = defineEmits<{
 
 const editorContainer = ref<HTMLElement>()
 let editor: any = null
+// 保存 loader.init() 返回的 monaco 实例 —— 此前改语言时读 (window as any).monaco，
+// 而该全局从未被赋值，导致切换语言后语法高亮始终停留在旧语言。
+let monacoInstance: any = null
 
 const languageMap: Record<string, string> = {
   python: 'python',
@@ -29,6 +32,7 @@ onMounted(async () => {
   if (!editorContainer.value) return
 
   const monacoEditor = await loader.init()
+  monacoInstance = monacoEditor
   editor = monacoEditor.editor.create(editorContainer.value, {
     value: props.modelValue,
     language: languageMap[props.language] || 'plaintext',
@@ -52,14 +56,9 @@ onMounted(async () => {
 watch(
   () => props.language,
   (newLang) => {
-    if (editor) {
-      const monacoEditor = (window as any).monaco
-      if (monacoEditor) {
-        monacoEditor.editor.setModelLanguage(
-          editor.getModel(),
-          languageMap[newLang] || 'plaintext'
-        )
-      }
+    const model = editor?.getModel()
+    if (model && monacoInstance) {
+      monacoInstance.editor.setModelLanguage(model, languageMap[newLang] || 'plaintext')
     }
   }
 )
