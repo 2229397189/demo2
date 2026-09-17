@@ -1,9 +1,12 @@
 package com.agi.assistant.service.evaluation;
 
+import com.agi.assistant.mapper.DocumentChunkMapper;
 import com.agi.assistant.mapper.DocumentMapper;
 import com.agi.assistant.mapper.GoldenQueryMapper;
 import com.agi.assistant.model.entity.Document;
+import com.agi.assistant.model.entity.DocumentChunk;
 import com.agi.assistant.model.entity.GoldenQuery;
+import com.agi.assistant.model.enums.DocumentStatus;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -13,7 +16,6 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 /**
@@ -29,18 +31,17 @@ public class BenchmarkDataset {
     private final ObjectMapper objectMapper;
     private final GoldenQueryMapper goldenQueryMapper;
     private final DocumentMapper documentMapper;
+    private final DocumentChunkMapper documentChunkMapper;
 
     /** 数据集缓存：datasetId → GoldenQuery 列表 */
     private final Map<String, List<GoldenQuery>> datasetCache = new ConcurrentHashMap<>();
 
-    /** 自增 ID 生成器 */
-    private final AtomicLong idGenerator = new AtomicLong(1);
-
     public BenchmarkDataset(ObjectMapper objectMapper, GoldenQueryMapper goldenQueryMapper,
-                            DocumentMapper documentMapper) {
+                            DocumentMapper documentMapper, DocumentChunkMapper documentChunkMapper) {
         this.objectMapper = objectMapper;
         this.goldenQueryMapper = goldenQueryMapper;
         this.documentMapper = documentMapper;
+        this.documentChunkMapper = documentChunkMapper;
         initSampleDataset();
     }
 
@@ -120,7 +121,8 @@ public class BenchmarkDataset {
     public GoldenQuery addGoldenQuery(String datasetId, String query, String expectedAnswer,
                                        String relevantDocIds, String difficulty, String category) {
         GoldenQuery goldenQuery = new GoldenQuery();
-        goldenQuery.setId(idGenerator.getAndIncrement());
+        // 不手工设置 id，交给数据库自增（golden_query.id 为 AUTO_INCREMENT），
+        // 避免重启后 idGenerator 从 1 自增导致与已有主键冲突而 insert 失败
         goldenQuery.setDatasetId(datasetId);
         goldenQuery.setQuery(query);
         goldenQuery.setExpectedAnswer(expectedAnswer);
@@ -129,7 +131,7 @@ public class BenchmarkDataset {
         goldenQuery.setCategory(category);
         goldenQuery.setCreatedAt(LocalDateTime.now());
 
-        // 保存到数据库
+        // 保存到数据库（落库后 MyBatis-Plus 会回填自增 id）
         try {
             goldenQueryMapper.insert(goldenQuery);
             log.info("Saved golden query to database: id={}", goldenQuery.getId());
@@ -148,6 +150,9 @@ public class BenchmarkDataset {
 
     /**
      * 批量添加黄金查询。
+     * <p>
+     * bug1 修复：原先只写入内存缓存、不落库，重启即丢。
+     * 现改为逐条 insert 到数据库，并同步更新缓存。
      *
      * @param datasetId   数据集 ID
      * @param goldenQueries GoldenQuery 列表
@@ -159,17 +164,86 @@ public class BenchmarkDataset {
 
         List<GoldenQuery> dataset = datasetCache.computeIfAbsent(datasetId, k -> new ArrayList<>());
         for (GoldenQuery gq : goldenQueries) {
-            if (gq.getId() == null) {
-                gq.setId(idGenerator.getAndIncrement());
-            }
+            // 不手工设置 id，清空后交给数据库自增，避免主键冲突
+            gq.setId(null);
             gq.setDatasetId(datasetId);
             if (gq.getCreatedAt() == null) {
                 gq.setCreatedAt(LocalDateTime.now());
             }
+            try {
+                goldenQueryMapper.insert(gq);
+            } catch (Exception e) {
+                log.warn("批量新增中单条落库失败 datasetId=[{}], query='{}': {}",
+                        datasetId, truncate(gq.getQuery(), 30), e.getMessage());
+            }
             dataset.add(gq);
         }
 
-        log.info("Batch added {} golden queries to dataset [{}]", goldenQueries.size(), datasetId);
+        log.info("批量新增 {} 条 golden query 到数据集 [{}]（已逐条落库）",
+                goldenQueries.size(), datasetId);
+    }
+
+    /**
+     * 从已上传文档构建数据集（供前端「从文档导入」使用）。
+     * <p>
+     * 查询已完成（status = {@link DocumentStatus#COMPLETED}，即 2）的文档，
+     * 为每篇文档生成一条 golden query：
+     * <ul>
+     *   <li>query：使用文档标题</li>
+     *   <li>expectedAnswer：使用首个 chunk 的内容（截断作为摘要）</li>
+     *   <li>relevantDocIds：使用文档真实 id（确保评测时检索指标能正确匹配）</li>
+     * </ul>
+     *
+     * @param datasetId 目标数据集 ID
+     * @param limit     最多使用多少篇文档
+     * @return 实际导入的 golden query 条数
+     */
+    public int importFromDocuments(String datasetId, int limit) {
+        if (datasetId == null || datasetId.isBlank()) {
+            log.warn("importFromDocuments: datasetId 为空，跳过");
+            return 0;
+        }
+        if (limit <= 0) {
+            limit = 4;
+        }
+
+        // 只取真正处理完成的文档：COMPLETED = 2。
+        // 注意 PENDING=0 / PROCESSING=1 / FAILED=3 / PARTIAL=4 都不是「可用于评测」的状态。
+        List<Document> docs = documentMapper.selectList(
+                new LambdaQueryWrapper<Document>()
+                        .eq(Document::getStatus, DocumentStatus.COMPLETED.getCode())
+                        .orderByDesc(Document::getCreatedAt)
+                        .last("LIMIT " + limit));
+
+        if (docs.isEmpty()) {
+            log.warn("没有已完成(status=1)的文档可用于构建数据集 [{}]", datasetId);
+            return 0;
+        }
+
+        int count = 0;
+        for (Document doc : docs) {
+            // 取该文档首个 chunk 作为 expectedAnswer（即文档摘要文本）
+            DocumentChunk firstChunk = documentChunkMapper.selectOne(
+                    new LambdaQueryWrapper<DocumentChunk>()
+                            .eq(DocumentChunk::getDocumentId, doc.getId())
+                            .orderByAsc(DocumentChunk::getChunkIndex)
+                            .last("LIMIT 1"));
+
+            String expectedAnswer = firstChunk != null
+                    ? truncate(firstChunk.getContent(), 1000)
+                    : "";
+            String query = doc.getTitle() != null && !doc.getTitle().isBlank()
+                    ? doc.getTitle()
+                    : ("文档 " + doc.getId());
+
+            addGoldenQuery(datasetId, query, expectedAnswer,
+                    serializeDocIds(List.of(String.valueOf(doc.getId()))),
+                    "medium", "文档导入");
+            count++;
+        }
+
+        log.info("从文档构建数据集 [{}] 完成，新增 {} 条 golden query", datasetId, count);
+        return count;
     }
 
     /**

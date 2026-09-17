@@ -25,3 +25,16 @@ export function compare(taskA: string, taskB: string): Promise<Result<Record<str
 export function listDatasets(): Promise<Result<Array<{ datasetId: string; queryCount: number }>>> {
   return request.get('/evaluation/datasets')
 }
+
+/** 触发指定评测任务的异步执行 */
+export function runTask(taskId: string): Promise<Result<EvaluationTask>> {
+  return request.post(`/evaluation/tasks/${taskId}/run`)
+}
+
+/** 从已上传文档构建数据集 */
+export function importFromDocuments(
+  datasetId: string,
+  limit = 4
+): Promise<Result<{ datasetId: string; imported: number }>> {
+  return request.post('/evaluation/datasets/import', null, { params: { datasetId, limit } })
+}

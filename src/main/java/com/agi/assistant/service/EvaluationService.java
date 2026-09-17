@@ -15,6 +15,16 @@ public interface EvaluationService {
     EvaluationTask createTask(EvaluationTaskRequest request, Long userId);
 
     /**
+     * 运行指定评测任务（异步执行），供前端「运行」按钮调用。
+     * <p>
+     * 不会重复触发：若任务处于 RUNNING 状态则直接返回当前任务。
+     *
+     * @param taskId 任务 ID
+     * @return 触发后的任务对象（状态应为 RUNNING）
+     */
+    EvaluationTask runTask(Long taskId);
+
+    /**
      * 获取用户的评测任务列表
      */
     List<EvaluationTask> listTasks(Long userId);

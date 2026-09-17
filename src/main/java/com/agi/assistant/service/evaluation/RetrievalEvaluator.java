@@ -44,8 +44,9 @@ public class RetrievalEvaluator {
         Set<String> expectedSet = new HashSet<>(expectedDocIds);
 
         double recallAtK = calculateRecallAtK(topK, expectedSet);
-        double precisionAtK = calculatePrecisionAtK(topK, expectedSet);
-        double mrr = calculateMRR(retrievedDocIds, expectedSet);
+        double precisionAtK = calculatePrecisionAtK(topK, expectedSet, k);
+        // MRR 必须在 topK 截断后的列表内计算，才与 K 口径一致（修复：原先遍历完整 retrieved 列表）
+        double mrr = calculateMRR(topK, expectedSet);
         double ndcgAtK = calculateNDCGAtK(topK, expectedSet, k);
         double hitRate = calculateHitRate(topK, expectedSet);
 
@@ -66,21 +67,27 @@ public class RetrievalEvaluator {
     }
 
     /**
-     * Precision@K = (命中数) / K
+     * Precision@K = (topK 中相关文档数) / K
+     * <p>
+     * 采用标准口径：分母为 K，而非实际检索到的条数。
+     * 若检索结果不足 K 条，缺失的槽位视为非相关，这样 Precision@K 与
+     * Recall@K / MRR@K 在同一 K 口径下才可比。例如检索到 3 条而 K=10，
+     * 仅命中 1 条时 Precision@10 = 1/10 = 0.1（而非 1/3）。
      */
-    private double calculatePrecisionAtK(List<String> topK, Set<String> expectedSet) {
+    private double calculatePrecisionAtK(List<String> topK, Set<String> expectedSet, int k) {
         if (topK.isEmpty()) return 0.0;
 
         long hits = topK.stream().filter(expectedSet::contains).count();
-        return (double) hits / topK.size();
+        int denom = k > 0 ? k : topK.size();
+        return (double) hits / denom;
     }
 
     /**
-     * MRR = 1 / rank_of_first_relevant_document
+     * MRR = 1 / rank_of_first_relevant_document（仅看 topK 内第一个相关文档）
      */
-    private double calculateMRR(List<String> retrieved, Set<String> expectedSet) {
-        for (int i = 0; i < retrieved.size(); i++) {
-            if (expectedSet.contains(retrieved.get(i))) {
+    private double calculateMRR(List<String> topK, Set<String> expectedSet) {
+        for (int i = 0; i < topK.size(); i++) {
+            if (expectedSet.contains(topK.get(i))) {
                 return 1.0 / (i + 1);
             }
         }

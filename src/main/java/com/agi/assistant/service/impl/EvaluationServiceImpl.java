@@ -60,10 +60,32 @@ public class EvaluationServiceImpl implements EvaluationService {
         evaluationTaskMapper.insert(task);
         log.info("Created evaluation task [{}] for user [{}]", task.getId(), userId);
 
-        // Start async evaluation via separate bean to avoid self-invocation
+        // 注意：创建任务不再自动触发执行，避免与「运行」按钮重复触发。
+        // 执行统一由 POST /api/evaluation/tasks/{taskId}/run 显式触发。
+        return task;
+    }
+
+    @Override
+    public EvaluationTask runTask(Long taskId) {
+        EvaluationTask task = evaluationTaskMapper.selectById(taskId);
+        if (task == null) {
+            throw new RuntimeException("评测任务不存在: " + taskId);
+        }
+        // 避免并发重复触发：正在运行中则直接返回当前任务
+        if (task.getStatus() != null && task.getStatus() == EvaluationStatus.RUNNING.getCode()) {
+            log.warn("评测任务 [{}] 正在运行，跳过重复触发", taskId);
+            return task;
+        }
+        // 同步置为 RUNNING，既提供即时反馈也作为并发锁，再异步执行
+        task.setStatus(EvaluationStatus.RUNNING.getCode());
+        task.setUpdatedAt(LocalDateTime.now());
+        evaluationTaskMapper.updateById(task);
+
+        // 通过独立的 EvaluationRunner bean 异步执行，避免自调用导致 @Async 失效
         evaluationRunner.runEvaluation(task.getId());
 
-        return task;
+        // 重新读取最新状态（此时应已置为 RUNNING）后返回
+        return evaluationTaskMapper.selectById(taskId);
     }
 
     @Override

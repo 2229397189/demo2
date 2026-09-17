@@ -43,7 +43,7 @@
             {{ formatTime(row.createdAt) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="250" fixed="right">
+        <el-table-column label="操作" width="320" fixed="right">
           <template #default="{ row }">
             <el-button type="primary" size="small" text @click="handleViewResults(row)">
               <el-icon><View /></el-icon>
@@ -58,6 +58,17 @@
             >
               <el-icon><DataAnalysis /></el-icon>
               对比
+            </el-button>
+            <el-button
+              type="warning"
+              size="small"
+              text
+              @click="handleRun(row)"
+              :loading="runningId === row.id"
+              :disabled="row.status === 1 || runningId === row.id"
+            >
+              <el-icon v-if="runningId !== row.id"><VideoPlay /></el-icon>
+              运行
             </el-button>
           </template>
         </el-table-column>
@@ -148,8 +159,14 @@
               :value="ds.datasetId"
             />
           </el-select>
+          <div style="margin-top: 6px;">
+            <el-button size="small" @click="handleImportFromDocs" :loading="importing">
+              <el-icon><DocumentAdd /></el-icon>
+              从已上传文档生成数据集
+            </el-button>
+          </div>
           <div v-if="datasets.length === 0" style="color: var(--color-text-tertiary); font-size: 12px; margin-top: 4px;">
-            暂无可用数据集，请联系管理员添加
+            暂无可用数据集，可点击上方按钮从已上传文档生成
           </div>
         </el-form-item>
         <el-form-item label="检索策略">
@@ -170,7 +187,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   Plus,
@@ -178,6 +195,8 @@ import {
   View,
   DataAnalysis,
   Close,
+  VideoPlay,
+  DocumentAdd,
 } from '@element-plus/icons-vue'
 import { useEvaluationStore } from '@/stores/evaluation'
 import * as evaluationApi from '@/api/evaluation'
@@ -190,8 +209,13 @@ const evaluationStore = useEvaluationStore()
 const showCreateDialog = ref(false)
 const creating = ref(false)
 const comparing = ref(false)
+const importing = ref(false)
 const selectedForCompare = ref<string[]>([])
 const datasets = ref<Array<{ datasetId: string; queryCount: number }>>([])
+// 当前正在运行的任务 id，用于按钮 loading
+const runningId = ref<string | null>(null)
+// 轮询定时器：任务运行中时定时刷新任务列表
+let pollTimer: number | null = null
 
 const newTask = ref({
   name: '',
@@ -236,6 +260,63 @@ async function handleCreateTask() {
 
 async function handleViewResults(task: EvaluationTask) {
   await evaluationStore.selectTask(task)
+}
+
+async function handleRun(task: EvaluationTask) {
+  runningId.value = task.id
+  try {
+    await evaluationStore.runTask(task.id)
+    ElMessage.success('评测任务已启动')
+    startPolling()
+  } catch (error) {
+    console.error('Failed to run task:', error)
+    ElMessage.error('启动评测任务失败')
+  } finally {
+    // 轮询期间不立即清除 loading，由轮询在任务退出 RUNNING 时清除
+    if (!pollTimer) {
+      runningId.value = null
+    }
+  }
+}
+
+function startPolling() {
+  if (pollTimer) return
+  pollTimer = window.setInterval(async () => {
+    await loadTasks()
+    // 检查当前运行中的任务是否已结束
+    const stillRunning = evaluationStore.tasks.some(
+      (t) => t.id === runningId.value && t.status === 1
+    )
+    if (!stillRunning) {
+      stopPolling()
+      ElMessage.info('评测任务已完成，可查看结果')
+    }
+  }, 2000)
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+  runningId.value = null
+}
+
+async function handleImportFromDocs() {
+  const targetId = newTask.value.datasetId || 'doc-import-dataset'
+  importing.value = true
+  try {
+    const res = await evaluationApi.importFromDocuments(targetId, 4)
+    const imported = res.data?.imported ?? 0
+    ElMessage.success(`已从文档导入 ${imported} 条评测数据到「${targetId}」`)
+    await loadDatasets()
+    newTask.value.datasetId = targetId
+  } catch (error) {
+    console.error('Failed to import dataset:', error)
+    ElMessage.error('从文档导入数据集失败')
+  } finally {
+    importing.value = false
+  }
 }
 
 function handleCompare(task: EvaluationTask) {
@@ -332,6 +413,10 @@ function getStatusLabel(status: string | number) {
 onMounted(() => {
   loadTasks()
   loadDatasets()
+})
+
+onUnmounted(() => {
+  stopPolling()
 })
 </script>
 

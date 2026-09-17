@@ -13,6 +13,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -58,6 +59,28 @@ public class EvaluationController {
         log.info("Get results for evaluation task {}", taskId);
         List<EvaluationResult> results = evaluationService.getTaskResults(taskId);
         return Result.ok(results);
+    }
+
+    @PostMapping("/tasks/{taskId}/run")
+    @Operation(summary = "运行评测任务", description = "触发指定评测任务的异步执行，供前端「运行」按钮调用")
+    public Result<EvaluationTask> runTask(
+            @Parameter(description = "任务ID") @PathVariable("taskId") Long taskId) {
+        log.info("Run evaluation task {}", taskId);
+        EvaluationTask task = evaluationService.runTask(taskId);
+        return Result.ok(task);
+    }
+
+    @PostMapping("/datasets/import")
+    @Operation(summary = "从已上传文档构建数据集", description = "用已完成上传的文档生成 golden query 数据集")
+    public Result<Map<String, Object>> importDatasetFromDocuments(
+            @Parameter(description = "数据集ID") @RequestParam("datasetId") String datasetId,
+            @Parameter(description = "最多使用的文档数") @RequestParam(value = "limit", defaultValue = "4") int limit) {
+        log.info("Import dataset [{}] from documents, limit={}", datasetId, limit);
+        int imported = benchmarkDataset.importFromDocuments(datasetId, limit);
+        Map<String, Object> result = new HashMap<>();
+        result.put("datasetId", datasetId);
+        result.put("imported", imported);
+        return Result.ok(result);
     }
 
     @GetMapping("/compare")

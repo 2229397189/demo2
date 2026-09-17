@@ -95,6 +95,21 @@ export const useEvaluationStore = defineStore('evaluation', () => {
     }
   }
 
+  async function runTask(taskId: string) {
+    try {
+      const res = await evaluationApi.runTask(taskId)
+      const normalized = normalizeTask(res.data)
+      const idx = tasks.value.findIndex((t) => t.id === normalized.id)
+      if (idx >= 0) {
+        tasks.value[idx] = normalized
+      }
+      return normalized
+    } catch (error) {
+      console.error('Failed to run task:', error)
+      throw error
+    }
+  }
+
   return {
     tasks,
     currentTask,
@@ -106,5 +121,6 @@ export const useEvaluationStore = defineStore('evaluation', () => {
     selectTask,
     loadResults,
     compareTasks,
+    runTask,
   }
 })
