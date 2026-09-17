@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Multi-source racing strategy service.
@@ -189,6 +190,11 @@ public class RaceStrategy {
      * 于是整轮竞速被判死、返回空，明明有一路能拿到数据。
      * 现在每个 future 完成时才判断是否可用，可用才认作赢家。
      *
+     * 修复说明 2（全员无结果时的空等）：仅当有人产出可用结果时才 complete，
+     * 意味着「所有参与者都降级返回空」这个常见场景下 winner 永不完成，
+     * 只能干等到 {@code timeoutSeconds} 才走兜底。本地中间件不可用时（Milvus/ES/Neo4j
+     * 全下线）每次检索都要白等 30s。现在用剩余计数收口：全员跑完仍无人可用就立即返回兜底值。
+     *
      * @param futures        各参与者的 future
      * @param usable         判定结果是否「可用」（非空 / 非空白）
      * @param timeoutSeconds 整体等待上限
@@ -205,17 +211,24 @@ public class RaceStrategy {
         }
 
         CompletableFuture<T> winner = new CompletableFuture<>();
+        // 剩余未完成的参与者数量。初始化时即取总数（而不是边遍历边计数），
+        // 这样即使某个 future 在注册回调前就已完成，也不会算错总数。
+        AtomicInteger remaining = new AtomicInteger(futures.size());
+
         for (CompletableFuture<T> future : futures) {
             future.whenComplete((value, error) -> {
-                if (error != null) {
-                    return;
-                }
-                try {
-                    if (usable.test(value)) {
-                        winner.complete(value);
+                if (error == null) {
+                    try {
+                        if (usable.test(value)) {
+                            winner.complete(value);
+                        }
+                    } catch (Exception ignored) {
+                        // 判定本身出错就当这个参与者没结果
                     }
-                } catch (Exception ignored) {
-                    // 判定本身出错就当这个参与者没结果
+                }
+                // complete 是幂等的：已有可用赢家时，这次兜底写入是空操作
+                if (remaining.decrementAndGet() == 0) {
+                    winner.complete(fallbackValue);
                 }
             });
         }
