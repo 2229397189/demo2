@@ -81,12 +81,20 @@
                 <span class="doc-chunks">{{ doc.chunkCount }} 个分块</span>
               </div>
               <div class="doc-status">
-                <el-tag :type="getStatusType(doc.status)" size="small" effect="light">
-                  <el-icon v-if="doc.status === 1" class="spin" :size="12"><Loading /></el-icon>
-                  {{ getStatusLabel(doc.status) }}
-                </el-tag>
+                <el-tooltip
+                  :disabled="!doc.errorMessage"
+                  :content="doc.errorMessage"
+                  placement="top"
+                >
+                  <el-tag :type="docStatusType(doc.status)" size="small" effect="light">
+                    <el-icon v-if="doc.status === 1" class="spin" :size="12"><Loading /></el-icon>
+                    {{ docStatusLabel(doc.status) }}
+                  </el-tag>
+                </el-tooltip>
                 <span class="doc-time">{{ formatRelativeTime(doc.createdAt) }}</span>
               </div>
+              <!-- 索引降级 / 失败原因：让「为什么这篇文档检索不到」可见 -->
+              <p v-if="doc.errorMessage" class="doc-note">{{ doc.errorMessage }}</p>
             </div>
             <div class="doc-actions">
               <el-button
@@ -151,7 +159,13 @@ import {
 import * as documentApi from '@/api/document'
 import type { Document as DocType } from '@/types'
 import SkeletonLoader from '@/components/common/SkeletonLoader.vue'
-import { formatFileSize, formatRelativeTime, getStatusType, getStatusLabel, documentStatusMap } from '@/utils/format'
+import { formatFileSize, formatRelativeTime, documentStatusMap } from '@/utils/format'
+
+// utils/format 里的通用 getStatusType / getStatusLabel 签名是 (statusMap, status)。
+// 模板里若直接写 getStatusType(doc.status)，等于把数字当映射表用，
+// 结果所有状态都会退化成「未知 / info」。这里直接绑定文档状态映射表。
+const docStatusType = (status: number) => documentStatusMap[status]?.type || 'info'
+const docStatusLabel = (status: number) => documentStatusMap[status]?.label || '未知'
 
 const documents = ref<DocType[]>([])
 const loading = ref(false)
@@ -176,6 +190,7 @@ async function loadDocuments() {
       updatedAt: raw.updatedAt,
       tags: raw.tags,
       source: raw.source,
+      errorMessage: raw.errorMessage || '',
     }))
     total.value = res.data.total
   } catch (error) {
@@ -491,6 +506,14 @@ onMounted(() => {
 .doc-time {
   font-size: var(--text-xs);
   color: var(--color-text-tertiary);
+}
+
+.doc-note {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--color-warning, #e6a23c);
+  word-break: break-word;
 }
 
 .doc-actions {

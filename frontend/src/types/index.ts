@@ -61,12 +61,14 @@ export interface Document {
   title: string
   fileType: string
   fileSize: number
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | number
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'PARTIAL' | number
   chunkCount: number
   createdAt: string
   updatedAt: string
   tags?: string
   source?: string
+  /** 最近一次处理的错误 / 降级说明：PARTIAL、FAILED 时用于定位「为什么检索不到」 */
+  errorMessage?: string
 }
 
 export interface Memory {
