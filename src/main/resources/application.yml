@@ -239,7 +239,8 @@ app:
     # 是否用「≥2 个问号」触发 ReAct（默认关）
     react-multi-question-enabled: ${CHAT_REACT_MULTI_QUESTION_ENABLED:false}
   sandbox:
-    # 沙箱执行总开关。关闭时 /api/sandbox 直接返回未启用
+    # 沙箱执行总开关。关闭（false）时 /api/sandbox 与 run_code 均直接返回「沙箱已禁用」，
+    # 不创建、不执行任何容器 —— 由 SandboxServiceImpl 在执行入口统一拦截。
     enabled: ${SANDBOX_ENABLED:true}
     # 是否要求显式确认后执行（true 时请求必须带 confirmed=true，否则拒绝并记审计）
     require-confirm: ${SANDBOX_REQUIRE_CONFIRM:false}

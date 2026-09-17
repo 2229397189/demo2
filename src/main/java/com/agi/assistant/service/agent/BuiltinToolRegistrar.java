@@ -276,6 +276,17 @@ public class BuiltinToolRegistrar {
                         return ToolResult.failure("run_code", "沙箱执行失败：" + e.getMessage());
                     }
 
+                    // 沙箱总开关（app.sandbox.enabled=false）：服务层未执行任何容器，
+                    // 返回带「已禁用」前缀的结果。这里必须转成结构化失败，
+                    // 否则一条「拒绝执行」会被当成正常输出返回给 LLM。
+                    if (response.getError() != null
+                            && response.getError().startsWith(SandboxService.SANDBOX_DISABLED_PREFIX)) {
+                        log.warn("run_code refused: sandbox disabled (app.sandbox.enabled=false)");
+                        return ToolResult.failure("run_code",
+                                "沙箱已禁用（app.sandbox.enabled=false）："
+                                        + "沙箱已被运维开关关闭，run_code 不会执行任何代码");
+                    }
+
                     StringBuilder sb = new StringBuilder();
                     if (response.getOutput() != null && !response.getOutput().isBlank()) {
                         sb.append(response.getOutput());

@@ -663,8 +663,31 @@ public class ChatServiceImpl implements ChatService {
                 req.setLanguage(language);
                 req.setCode(code);
                 req.setTimeout(30);
+                // 显式声明「未确认」：这条「自动执行 LLM 回答里代码块」的路径绝不能替用户确认，
+                // 否则当 app.sandbox.require-confirm=true 时会直接架空确认门槛（安全倒退）。
+                // 这里的 setConfirmed(false) 是明示而非遗漏 —— 请勿改成 true。
+                req.setConfirmed(false);
 
                 SandboxExecuteResponse response = sandboxService.execute(req);
+
+                // 沙箱总开关关闭（app.sandbox.enabled=false）：服务层未创建/未执行任何容器，
+                // 返回带「已禁用」前缀的结果。单独发语义明确的事件，避免把「拒绝执行」
+                // 混进正常执行结果里造成误读。
+                if (response.getError() != null
+                        && response.getError().startsWith(SandboxService.SANDBOX_DISABLED_PREFIX)) {
+                    log.warn("Code block not executed: sandbox disabled (app.sandbox.enabled=false)");
+                    Map<String, Object> disabledEvent = new HashMap<>();
+                    disabledEvent.put("language", language);
+                    disabledEvent.put("code", code);
+                    disabledEvent.put("output", null);
+                    disabledEvent.put("error", "代码块未执行：沙箱已被关闭（app.sandbox.enabled=false）");
+                    disabledEvent.put("exitCode", -1);
+                    disabledEvent.put("executionTime", 0L);
+                    emitter.send(SseEmitter.event()
+                            .name("sandbox")
+                            .data(disabledEvent));
+                    continue;
+                }
 
                 // Send sandbox result as SSE event
                 Map<String, Object> sandboxEvent = new HashMap<>();
@@ -681,6 +704,24 @@ public class ChatServiceImpl implements ChatService {
 
                 log.info("Sandbox execution completed: exitCode={}, time={}ms",
                         response.getExitCode(), response.getExecutionTime());
+            } catch (IllegalArgumentException e) {
+                // 安全门槛拒绝（app.sandbox.require-confirm=true 且未确认）：这不是执行故障，
+                // 而是「代码块被安全策略挡住」。必须发语义明确的事件，
+                // 而不是笼统的 "Execution failed"，否则用户只看到「失败」却不知为何。
+                log.warn("Code block not executed: sandbox confirmation required: {}", e.getMessage());
+                try {
+                    Map<String, Object> blockedEvent = new HashMap<>();
+                    blockedEvent.put("language", language);
+                    blockedEvent.put("code", code);
+                    blockedEvent.put("output", null);
+                    blockedEvent.put("error", "代码块未执行：沙箱要求用户确认后才可运行"
+                            + "（app.sandbox.require-confirm=true，请在参数中携带 confirmed=true）");
+                    blockedEvent.put("exitCode", -1);
+                    blockedEvent.put("executionTime", 0L);
+                    emitter.send(SseEmitter.event()
+                            .name("sandbox")
+                            .data(blockedEvent));
+                } catch (Exception ignored) {}
             } catch (Exception e) {
                 log.warn("Sandbox execution failed: {}", e.getMessage());
                 try {

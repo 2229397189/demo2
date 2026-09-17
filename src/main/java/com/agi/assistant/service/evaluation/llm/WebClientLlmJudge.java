@@ -15,6 +15,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * {@link LlmJudge} 的默认实现：通过 {@link WebClient} 调用 OpenAI 兼容的
@@ -42,8 +44,16 @@ public class WebClientLlmJudge implements LlmJudge {
     /** claim 分解的最大输出 token（声明列表可能较长）。 */
     private static final int DECOMPOSE_MAX_TOKENS = 1024;
 
-    /** 布尔判定（true/false）的最大输出 token，留足余量以防模型多输出几个词。 */
+    /** 布尔判定的最大输出 token，留足余量以防模型多输出几个词。 */
     private static final int JUDGE_MAX_TOKENS = 16;
+
+    /**
+     * 布尔整词匹配：只认独立成词的 true/false/yes/no。
+     * <p>
+     * 用 {@code \b} 词边界而非 {@code contains}，从而杜绝子串误判 ——
+     * 典型坑是 {@code "unknown"}/{@code "none"} 含子串 {@code "no"} 被错判成 false。
+     */
+    private static final Pattern BOOL_TOKEN = Pattern.compile("\\b(true|false|yes|no)\\b");
 
     private final WebClient openAiWebClient;
     private final OpenAIConfig openAIConfig;
@@ -283,25 +293,62 @@ public class WebClientLlmJudge implements LlmJudge {
     }
 
     /**
-     * 严格解析布尔判定，容忍 {@code true/false/yes/no/是/否/支持/不支持} 等表述。
+     * 严格解析布尔判定，容忍 {@code true/false/yes/no/是/否/支持/不支持} 等整词表述。
+     * <p>
+     * 修复说明：此前用 {@code contains("no")} 之类的<b>子串匹配</b>，会把
+     * {@code "unknown"}（含 {@code "no"}）误判成 {@code false}；更严重的是，当返回内容
+     * 无法解析时它也返回 {@code false} 却<b>不改</b>{@link #lastCallSucceeded}，导致上层把
+     * 「解析失败」当成「LLM 明确回答 false」，无理由压低 Faithfulness。
+     * <p>
+     * 现在：
+     * <ul>
+     *   <li>先 trim + 小写，英文只用 {@link #BOOL_TOKEN} 做<b>整词</b>匹配
+     *       （{@code \b(true|false|yes|no)\b}），彻底消除子串误判；</li>
+     *   <li>明确 true → 返回 true；明确 false → 返回 false，均保持 {@code lastCallSucceeded} 不变；</li>
+     *   <li>无法解析（无整词命中，或同时出现互相矛盾的 token）→ 返回 false 仅作占位，
+     *       并把 {@code lastCallSucceeded} 置 false，上层据此把该指标记为不可用（-1.0），
+     *       绝不猜测。</li>
+     * </ul>
      *
-     * @return 解析出的布尔值；无法解析时返回 {@code false}
+     * @param content LLM 回复文本
+     * @return 明确 true → {@code true}；明确 false 或无法解析 → {@code false}
      */
     private boolean parseBoolean(String content) {
         if (content == null || content.isBlank()) {
+            // 没有内容 = 本次判定没有结论 → 标记不可用，不猜
+            lastCallSucceeded = false;
             return false;
         }
         String c = content.toLowerCase(Locale.ROOT).trim();
-        // 先判否定，避免「不支持」命中「支持」
-        if (c.contains("false") || c.contains("untrue")
-                || c.contains("不支持") || c.contains("不正确") || c.contains("不是")
-                || c.contains("否") || c.contains("no")) {
+
+        // 中文：先判否定，避免「不支持」误命中「支持」
+        if (c.contains("不支持") || c.contains("不正确") || c.contains("不是") || c.contains("否")) {
             return false;
         }
-        if (c.contains("true") || c.contains("yes")
-                || c.contains("支持") || c.contains("是")) {
+        if (c.contains("支持") || c.contains("是")) {
             return true;
         }
+
+        // 英文：整词匹配（绝不子串匹配 → "unknown" 不再被判成 false）
+        Boolean decided = null;
+        Matcher matcher = BOOL_TOKEN.matcher(c);
+        while (matcher.find()) {
+            boolean value = "true".equals(matcher.group(1)) || "yes".equals(matcher.group(1));
+            if (decided == null) {
+                decided = value;
+            } else if (decided != value) {
+                // 同时出现互相矛盾的 token（如同时含 true 与 false）：无法据此判定 → 不猜
+                decided = null;
+                break;
+            }
+        }
+        if (decided != null) {
+            return decided;
+        }
+
+        // 无法解析为明确布尔：不猜，标记本次调用不可用（上层记 -1.0）
+        lastCallSucceeded = false;
+        log.warn("LlmJudge 布尔判定无法解析（视为不可用，不猜测）：{}", truncate(content, 100));
         return false;
     }
 

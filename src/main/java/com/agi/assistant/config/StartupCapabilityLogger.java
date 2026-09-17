@@ -303,8 +303,15 @@ public class StartupCapabilityLogger implements ApplicationRunner {
                 return new Probe("unknown", "SandboxRuntime 未装配");
             }
             boolean available = runtime.isAvailable();
-            String detail = "dockerHost=" + runtime.getDockerHost()
-                    + (available ? "" : "（守护进程不可达，/api/sandbox 执行不可用）");
+            String detail;
+            if (!sandboxEnabled) {
+                // 与 SandboxServiceImpl 的执行入口门保持一致：总开关关闭时，
+                // 守护进程是否可达都不影响结论 —— 沙箱执行已被全局拒绝。
+                detail = "app.sandbox.enabled=false，沙箱执行（/api/sandbox 与 run_code）已全局关闭";
+            } else {
+                detail = "dockerHost=" + runtime.getDockerHost()
+                        + (available ? "" : "（守护进程不可达，/api/sandbox 执行不可用）");
+            }
             return new Probe(String.valueOf(available), detail);
         });
     }
