@@ -40,6 +40,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '代码沙箱' },
   },
   {
+    path: '/agent',
+    name: 'Agent',
+    component: () => import('@/views/AgentView.vue'),
+    meta: { title: 'Agent 工作台' },
+  },
+  {
     path: '/:pathMatch(.*)*',
     name: 'NotFound',
     redirect: '/',

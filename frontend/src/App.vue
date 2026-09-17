@@ -118,6 +118,7 @@ import {
   Operation,
   User,
   SwitchButton,
+  MagicStick,
 } from '@element-plus/icons-vue'
 import ThemeToggle from '@/components/common/ThemeToggle.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -173,6 +174,11 @@ const menuItems = [
     path: '/sandbox',
     label: '代码沙箱',
     icon: Cpu,
+  },
+  {
+    path: '/agent',
+    label: 'Agent 工作台',
+    icon: MagicStick,
   },
 ]
 

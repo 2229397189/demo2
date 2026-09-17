@@ -1,0 +1,58 @@
+# ============================================================
+#  集成测试专用配置（@ActiveProfiles("test") 时加载）
+#  策略：连真实本机 MySQL 的「独立测试库」，关掉所有外部中间件，
+#        只验证 HTTP 层 + MyBatis-Plus SQL + Spring 上下文装配的正确性。
+#  不依赖 Docker / ES / Neo4j / Milvus / Kafka / Redis。
+# ============================================================
+
+spring:
+  config:
+    import: "optional:file:.env[.properties]"
+
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 独立测试库，绝不污染开发库 agi_assistant
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/agi_assistant_test?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:123456}
+    hikari:
+      maximum-pool-size: 5
+      initialization-fail-timeout: 0
+
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:init-test.sql
+      continue-on-error: true
+
+  # 关闭 Redis（测试不依赖缓存/短期记忆；即便连不上也不阻断启动）
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      password: ""
+
+# 鉴权：集成测试显式开启，验证登录链路
+app:
+  security:
+    auth-enabled: true
+    jwt-secret: integration-test-secret-key-0123456789abcdef
+    jwt-expire-hours: 168
+  sandbox:
+    enabled: false
+
+# 关闭所有外部中间件（顶层键，与 application.yml 对齐）
+milvus:
+  enabled: false
+neo4j:
+  enabled: false
+rag:
+  initializer:
+    enabled: false
+  graph-extraction:
+    enabled: false
+spring.kafka.enabled: false
+ark:
+  enabled: false
+embedding:
+  provider: local
