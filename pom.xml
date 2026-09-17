@@ -249,6 +249,18 @@
                     </annotationProcessorPaths>
                 </configuration>
             </plugin>
+            <!-- 真实联调测试（*LiveTest）默认排除，避免 mvn test 触发真实网络请求/产生费用。
+                 -Dtest 会覆盖 excludes，手动运行：
+                 mvn -q test -Dtest=ArkModelProviderLiveTest -DfailIfNoTests=false -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>**/*LiveTest.java</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 

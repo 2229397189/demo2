@@ -169,6 +169,25 @@ openai:
   thinking: ${OPENAI_THINKING:disabled}
 
 # ──────────────────────────────────────────────────────────────
+#  模型 Provider 路由
+#  llm.provider 选择默认 provider：glm（智谱，默认）/ ark（火山方舟，需 ARK_ENABLED=true 且有 key）。
+#  配置的 provider 不可用（缺 key / 未启用 / 名字非法）时，ModelProviderRouter 自动回退 GLM；
+#  连 GLM 都不可用则抛 ProviderUnavailableException，由调用方降级。
+#  Ark 关闭或 key 为空时 ArkModelProvider 仅呈现为不可用，不影响应用启动。
+# ──────────────────────────────────────────────────────────────
+llm:
+  provider: ${LLM_PROVIDER:glm}
+
+# 火山方舟（Ark）—— OpenAI 兼容端点。enabled=false 或 key 为空时优雅降级，不建连、不影响启动。
+ark:
+  enabled: ${ARK_ENABLED:false}
+  base-url: ${ARK_BASE_URL:https://ark.cn-beijing.volces.com/api/v3}
+  api-key: ${ARK_API_KEY:}
+  model: ${ARK_MODEL:}
+  timeout: ${ARK_TIMEOUT:120}
+  connect-timeout: ${ARK_CONNECT_TIMEOUT:30}
+
+# ──────────────────────────────────────────────────────────────
 #  Embedding
 #  注意：智谱赠送资源包不含 embedding（调用返回 code=1113 余额不足），
 #  因此 embedding 单独走阿里云百炼 DashScope text-embedding-v3。
