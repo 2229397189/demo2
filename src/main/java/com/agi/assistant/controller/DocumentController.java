@@ -5,6 +5,7 @@ import com.agi.assistant.model.entity.Document;
 import com.agi.assistant.model.vo.PageResult;
 import com.agi.assistant.model.vo.Result;
 import com.agi.assistant.service.DocumentService;
+import com.agi.assistant.service.security.UserContext;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -29,8 +30,8 @@ public class DocumentController {
             @Parameter(description = "文档文件") @RequestParam("file") MultipartFile file,
             @Parameter(description = "文档标题") @RequestParam(required = false) String title,
             @Parameter(description = "标签") @RequestParam(required = false) String tags,
-            @Parameter(description = "来源") @RequestParam(required = false) String source,
-            @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId) {
+            @Parameter(description = "来源") @RequestParam(required = false) String source) {
+        Long userId = UserContext.requireUserId();
         log.info("Upload document by user {}, fileName {}", userId, file.getOriginalFilename());
         DocumentUploadRequest request = new DocumentUploadRequest();
         request.setTitle(title);
@@ -43,9 +44,9 @@ public class DocumentController {
     @GetMapping
     @Operation(summary = "文档列表", description = "分页获取用户的文档列表")
     public Result<PageResult<Document>> listDocuments(
-            @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId,
             @Parameter(description = "页码") @RequestParam(defaultValue = "1") int page,
             @Parameter(description = "每页数量") @RequestParam(defaultValue = "10") int size) {
+        Long userId = UserContext.requireUserId();
         log.info("List documents for user {}, page {}, size {}", userId, page, size);
         PageResult<Document> result = documentService.listDocuments(userId, page, size);
         return Result.ok(result);
@@ -66,9 +67,8 @@ public class DocumentController {
 
     @DeleteMapping("/{id}")
     @Operation(summary = "删除文档", description = "删除指定的文档")
-    public Result<Void> deleteDocument(
-            @Parameter(description = "文档ID") @PathVariable("id") String documentId,
-            @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId) {
+    public Result<Void> deleteDocument(@Parameter(description = "文档ID") @PathVariable("id") String documentId) {
+        Long userId = UserContext.requireUserId();
         Long id = parseId(documentId);
         if (id == null) {
             log.warn("Invalid document ID in delete request: {}", documentId);

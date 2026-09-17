@@ -5,6 +5,7 @@ import com.agi.assistant.model.entity.EvaluationResult;
 import com.agi.assistant.model.entity.EvaluationTask;
 import com.agi.assistant.model.vo.Result;
 import com.agi.assistant.service.EvaluationService;
+import com.agi.assistant.service.security.UserContext;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -35,9 +36,8 @@ public class EvaluationController {
 
     @PostMapping("/tasks")
     @Operation(summary = "创建评测任务", description = "创建一个新的RAG评测任务")
-    public Result<EvaluationTask> createTask(
-            @Valid @RequestBody EvaluationTaskRequest request,
-            @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId) {
+    public Result<EvaluationTask> createTask(@Valid @RequestBody EvaluationTaskRequest request) {
+        Long userId = UserContext.requireUserId();
         log.info("Create evaluation task for user {}, name {}", userId, request.getName());
         EvaluationTask task = evaluationService.createTask(request, userId);
         return Result.ok(task);
@@ -45,8 +45,8 @@ public class EvaluationController {
 
     @GetMapping("/tasks")
     @Operation(summary = "评测任务列表", description = "获取当前用户的评测任务列表")
-    public Result<List<EvaluationTask>> listTasks(
-            @Parameter(description = "用户ID") @RequestHeader(value = "X-User-Id", required = false, defaultValue = "1") Long userId) {
+    public Result<List<EvaluationTask>> listTasks() {
+        Long userId = UserContext.requireUserId();
         log.info("List evaluation tasks for user {}", userId);
         List<EvaluationTask> tasks = evaluationService.listTasks(userId);
         return Result.ok(tasks);

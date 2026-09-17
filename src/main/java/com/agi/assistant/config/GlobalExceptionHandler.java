@@ -32,6 +32,38 @@ public class GlobalExceptionHandler {
         return contentType != null && contentType.contains(MediaType.TEXT_EVENT_STREAM_VALUE);
     }
 
+    @ExceptionHandler(com.agi.assistant.service.security.AuthenticationException.class)
+    @ResponseStatus(HttpStatus.UNAUTHORIZED)
+    public Result<Void> handleAuthenticationException(
+            com.agi.assistant.service.security.AuthenticationException e, HttpServletResponse response) {
+        log.warn("认证失败: {}", e.getMessage());
+        if (isSseResponse(response)) return null;
+        return Result.fail(401, e.getMessage());
+    }
+
+    @ExceptionHandler(com.agi.assistant.service.security.AccessDeniedException.class)
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    public Result<Void> handleAccessDeniedException(
+            com.agi.assistant.service.security.AccessDeniedException e, HttpServletResponse response) {
+        log.warn("越权访问: {}", e.getMessage());
+        if (isSseResponse(response)) return null;
+        return Result.fail(403, e.getMessage());
+    }
+
+    /**
+     * 业务性参数错误 → 400。
+     * <p>
+     * 需要单独处理，否则 IllegalArgumentException 会落到 RuntimeException 分支被当成 500 ——
+     * 「用户名已被占用」这种客户端错误报成服务端故障，会让排查方向完全跑偏。
+     */
+    @ExceptionHandler(IllegalArgumentException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public Result<Void> handleIllegalArgument(IllegalArgumentException e, HttpServletResponse response) {
+        log.warn("参数/业务校验失败: {}", e.getMessage());
+        if (isSseResponse(response)) return null;
+        return Result.fail(400, e.getMessage());
+    }
+
     @ExceptionHandler(RuntimeException.class)
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
     public Result<Void> handleRuntimeException(RuntimeException e, HttpServletResponse response) throws IOException {

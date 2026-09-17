@@ -9,6 +9,7 @@ import com.agi.assistant.service.agent.DAGScheduler;
 import com.agi.assistant.service.agent.TaskDAG;
 import com.agi.assistant.service.agent.ToolRegistry;
 import com.agi.assistant.service.harness.HarnessRuntime;
+import com.agi.assistant.service.security.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;

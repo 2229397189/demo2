@@ -1,5 +1,6 @@
 package com.agi.assistant.config;
 
+import com.agi.assistant.service.security.AuthInterceptor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -8,6 +9,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.converter.HttpMessageConverter;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
@@ -18,6 +20,35 @@ import java.util.List;
 public class WebConfig implements WebMvcConfigurer {
 
     private static final long MAX_AGE_SECS = 3600;
+
+    private final AuthInterceptor authInterceptor;
+
+    public WebConfig(AuthInterceptor authInterceptor) {
+        this.authInterceptor = authInterceptor;
+    }
+
+    /**
+     * 注册认证拦截器。
+     * <p>
+     * 放行清单的原则：只有「拿到身份之前就必须能访问」的接口才排除。
+     * <ul>
+     *   <li>{@code /api/auth/login}、{@code /api/auth/register} —— 登录与注册本身</li>
+     *   <li>Swagger / OpenAPI —— 文档页面</li>
+     * </ul>
+     * 其余 {@code /api/**} 一律需要有效 token（或显式关闭鉴权时的 X-User-Id 回退）。
+     */
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(authInterceptor)
+                .addPathPatterns("/api/**")
+                .excludePathPatterns(
+                        "/api/auth/login",
+                        "/api/auth/register",
+                        "/v3/api-docs/**",
+                        "/swagger-ui/**",
+                        "/swagger-ui.html"
+                );
+    }
 
     @Override
     public void addCorsMappings(CorsRegistry registry) {
