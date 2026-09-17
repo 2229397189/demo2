@@ -1,10 +1,12 @@
 package com.agi.assistant.controller;
 
+import com.agi.assistant.model.dto.EvaluationSnapshot;
 import com.agi.assistant.model.dto.EvaluationTaskRequest;
 import com.agi.assistant.model.entity.EvaluationResult;
 import com.agi.assistant.model.entity.EvaluationTask;
 import com.agi.assistant.model.vo.Result;
 import com.agi.assistant.service.EvaluationService;
+import com.agi.assistant.service.evaluation.EvaluationSnapshotService;
 import com.agi.assistant.service.security.UserContext;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -12,6 +14,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
@@ -27,6 +30,11 @@ public class EvaluationController {
 
     private final EvaluationService evaluationService;
     private final com.agi.assistant.service.evaluation.BenchmarkDataset benchmarkDataset;
+    private final EvaluationSnapshotService evaluationSnapshotService;
+
+    /** build 端点未显式传 useLlm 时的默认值（对应 evaluation.benchmark.use-llm）。 */
+    @Value("${evaluation.benchmark.use-llm:true}")
+    private boolean defaultUseLlm;
 
     @GetMapping("/datasets")
     @Operation(summary = "可用数据集列表", description = "列出所有可用的评测数据集及其查询数量")
@@ -81,6 +89,44 @@ public class EvaluationController {
         result.put("datasetId", datasetId);
         result.put("imported", imported);
         return Result.ok(result);
+    }
+
+    @PostMapping("/datasets/build")
+    @Operation(summary = "用 LLM 从文档构建数据集",
+            description = "取 COMPLETED/PARTIAL 文档，为每篇生成一条 golden query（逐条落库）；"
+                    + "useLlm=false 或 LLM 不可用时 query 回退为文档标题")
+    public Result<Map<String, Object>> buildDatasetFromDocuments(
+            @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> req = body == null ? Map.of() : body;
+        String datasetId = req.get("datasetId") == null ? null : String.valueOf(req.get("datasetId"));
+        int limit = req.get("limit") instanceof Number n ? n.intValue() : 4;
+        boolean useLlm = req.get("useLlm") instanceof Boolean b ? b : defaultUseLlm;
+        log.info("Build dataset [{}] from documents, limit={}, useLlm={}", datasetId, limit, useLlm);
+        int imported = benchmarkDataset.buildFromDocuments(datasetId, limit, useLlm);
+        Map<String, Object> result = new HashMap<>();
+        result.put("datasetId", datasetId);
+        result.put("imported", imported);
+        result.put("useLlm", useLlm);
+        return Result.ok(result);
+    }
+
+    @PostMapping("/tasks/{taskId}/snapshot")
+    @Operation(summary = "导出评测结果快照",
+            description = "把该任务的全部结果导出为 evaluation.snapshot.dir 下的 json + md（真实数值，未评估为 null）")
+    public Result<Map<String, String>> exportSnapshot(
+            @Parameter(description = "任务ID") @PathVariable("taskId") Long taskId,
+            @Parameter(description = "检索策略（缺省用任务自身策略）")
+            @RequestParam(value = "strategy", required = false) String strategy) {
+        log.info("Export snapshot for evaluation task {} (strategy={})", taskId, strategy);
+        EvaluationSnapshot snapshot = evaluationSnapshotService.exportSnapshot(taskId, strategy);
+        return Result.ok(evaluationSnapshotService.snapshotRelativePaths(snapshot));
+    }
+
+    @GetMapping("/snapshots")
+    @Operation(summary = "已导出快照列表", description = "列出 evaluation.snapshot.dir 下已导出的快照文件（文件名 / 大小 / 时间）")
+    public Result<List<Map<String, Object>>> listSnapshots() {
+        log.info("List evaluation snapshots");
+        return Result.ok(evaluationSnapshotService.listSnapshots());
     }
 
     @GetMapping("/compare")

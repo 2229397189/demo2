@@ -8,15 +8,14 @@ import com.agi.assistant.model.entity.EvaluationTask;
 import com.agi.assistant.model.entity.GoldenQuery;
 import com.agi.assistant.model.entity.SearchResult;
 import com.agi.assistant.model.enums.EvaluationStatus;
+import com.agi.assistant.service.llm.ModelProviderRouter;
 import com.agi.assistant.service.rag.HybridRetrievalService;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
@@ -34,6 +33,7 @@ public class EvaluationRunner {
     private final GenerationEvaluator generationEvaluator;
     private final HybridRetrievalService hybridRetrievalService;
     private final OpenAIConfig openAIConfig;
+    private final ModelProviderRouter modelProviderRouter;
     private final ObjectMapper objectMapper;
 
     @Async
@@ -166,12 +166,17 @@ public class EvaluationRunner {
     /**
      * 调用 LLM（非流式）基于检索上下文生成答案。
      * <p>
+     * <b>走 {@link ModelProviderRouter}</b>（而非直接调 GLM）：这样评测的「生成答案」这一步
+     * 可随 {@code llm.provider} 配置在 GLM / Ark 之间切换 —— 这正是「模型选型对比」这条能力
+     * 的代码落点；同时 {@code ModelProviderRouter.activeProviderName()} 会被写入快照的
+     * {@code meta.model}，让「哪次评测用了哪个模型」有据可查。
+     * <p>
      * prompt 显式要求模型「只依据给定上下文回答，上下文不足就说不知道」，
      * 避免模型用自身知识编造，从而保证 faithfulness 评测反映真实生成质量。
      *
      * @param query    原始问题
      * @param contexts 检索到的上下文列表
-     * @return 生成的答案；调用失败或解析失败时抛出异常（由调用方做降级处理）
+     * @return 生成的答案；provider 不可用或调用失败时抛出异常（由调用方做降级处理）
      */
     private String generateAnswer(String query, List<String> contexts) {
         String contextBlock = String.join("\n---\n", contexts);
@@ -189,39 +194,13 @@ public class EvaluationRunner {
                 请直接给出答案，不要添加额外解释或前缀。
                 """, truncate(contextBlock, 6000), truncate(query, 1000));
 
-        Map<String, Object> requestBody = Map.of(
-                "model", openAIConfig.getModel(),
-                "messages", List.of(
-                        Map.of("role", "system",
-                                "content", "你是一个严格依据给定上下文作答的问答助手。"),
-                        Map.of("role", "user", "content", prompt)),
-                "temperature", openAIConfig.getTemperature(),
-                "max_tokens", openAIConfig.getMaxTokens(),
-                "stream", false);
+        List<Map<String, String>> messages = List.of(
+                Map.of("role", "system",
+                        "content", "你是一个严格依据给定上下文作答的问答助手。"),
+                Map.of("role", "user", "content", prompt));
 
-        // 复用 OpenAIConfig 中配置的非流式 WebClient（base-url 指向智谱 GLM 兼容端点）
-        String response = openAIConfig.openAiWebClient()
-                .post()
-                .uri("/chat/completions")
-                .bodyValue(requestBody)
-                .retrieve()
-                .bodyToMono(String.class)
-                .block(Duration.ofSeconds(openAIConfig.getTimeout()));
-
-        return parseContent(response);
-    }
-
-    /**
-     * 从 /chat/completions 的非流式响应中解析出回复文本。
-     */
-    private String parseContent(String response) {
-        try {
-            JsonNode root = objectMapper.readTree(response);
-            return root.at("/choices/0/message/content").asText("").trim();
-        } catch (Exception e) {
-            log.error("解析 LLM 生成响应失败: {}", e.getMessage());
-            return null;
-        }
+        return modelProviderRouter.chat(
+                messages, openAIConfig.getTemperature(), openAIConfig.getMaxTokens());
     }
 
     private String truncate(String text, int maxLen) {

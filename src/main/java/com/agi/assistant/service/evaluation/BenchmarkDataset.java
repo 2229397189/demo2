@@ -7,6 +7,7 @@ import com.agi.assistant.model.entity.Document;
 import com.agi.assistant.model.entity.DocumentChunk;
 import com.agi.assistant.model.entity.GoldenQuery;
 import com.agi.assistant.model.enums.DocumentStatus;
+import com.agi.assistant.service.llm.ModelProviderRouter;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,20 +29,35 @@ import java.util.stream.Collectors;
 @Service
 public class BenchmarkDataset {
 
+    /** expectedAnswer 取自首 chunk 时的最大长度（超出即截断并加省略号，肉眼可辨）。 */
+    static final int EXPECTED_ANSWER_MAX_LEN = 500;
+
+    /** 送入 LLM 用于生成问题的来源文本（标题 + 首 chunk）的最大长度。 */
+    private static final int QUERY_SOURCE_MAX_LEN = 500;
+
+    /** 生成 golden query 问题时的最大 token 数。 */
+    private static final int QUERY_GEN_MAX_TOKENS = 128;
+
+    /** 生成 golden query 问题时的采样温度（偏低，追求稳定、贴近真实提问）。 */
+    private static final double QUERY_GEN_TEMPERATURE = 0.3;
+
     private final ObjectMapper objectMapper;
     private final GoldenQueryMapper goldenQueryMapper;
     private final DocumentMapper documentMapper;
     private final DocumentChunkMapper documentChunkMapper;
+    private final ModelProviderRouter modelProviderRouter;
 
     /** 数据集缓存：datasetId → GoldenQuery 列表 */
     private final Map<String, List<GoldenQuery>> datasetCache = new ConcurrentHashMap<>();
 
     public BenchmarkDataset(ObjectMapper objectMapper, GoldenQueryMapper goldenQueryMapper,
-                            DocumentMapper documentMapper, DocumentChunkMapper documentChunkMapper) {
+                            DocumentMapper documentMapper, DocumentChunkMapper documentChunkMapper,
+                            ModelProviderRouter modelProviderRouter) {
         this.objectMapper = objectMapper;
         this.goldenQueryMapper = goldenQueryMapper;
         this.documentMapper = documentMapper;
         this.documentChunkMapper = documentChunkMapper;
+        this.modelProviderRouter = modelProviderRouter;
         initSampleDataset();
     }
 
@@ -244,6 +260,146 @@ public class BenchmarkDataset {
 
         log.info("从文档构建数据集 [{}] 完成，新增 {} 条 golden query", datasetId, count);
         return count;
+    }
+
+    /**
+     * 从已上传文档构建基准数据集（P0 主路径，供 {@code POST /api/evaluation/datasets/build} 使用）。
+     * <p>
+     * 与 {@link #importFromDocuments(String, int)} 的区别：本方法为每篇文档用 LLM 生成一个
+     * 「用户真会提出的问题」作为 golden query（{@code useLlm=true}），并按需回退，且<b>逐条落库</b>。
+     * <p>
+     * 取文档规则：状态 ∈ { {@link DocumentStatus#COMPLETED}, {@link DocumentStatus#PARTIAL} }
+     * （COMPLETED=全链路成功，PARTIAL=分块已落库、部分索引成功，二者均<u>可用</u>于评测；
+     * PENDING / PROCESSING / FAILED 一律排除）。最多取 {@code limit} 篇。
+     * <p>
+     * 每篇文档生成一条 golden query：
+     * <ul>
+     *   <li>{@code relevantDocIds} = {@code [该文档真实 id]}（真实 id，不是下标、不是随机数）；</li>
+     *   <li>{@code expectedAnswer} = 该文档首个 chunk 的文本，超长则截断到
+     *       {@value #EXPECTED_ANSWER_MAX_LEN} 字符并加省略号（截断肉眼可辨）；</li>
+     *   <li>{@code query} = 当 {@code useLlm=true} 且 LLM 可用时，用 LLM 从「标题 + 首 chunk」
+     *       生成一个真实用户问题；否则回退为<b>文档标题</b>（真实、非编造）。</li>
+     * </ul>
+     * <b>诚信约定</b>：0 篇文档时返回 {@code 0} 且<b>不产生任何样本</b>，绝不伪造占位数据。
+     *
+     * @param datasetId 目标数据集 ID
+     * @param limit     最多使用多少篇文档（{@code <= 0} 视为 0，不导入）
+     * @param useLlm    是否用 LLM 生成问题；false 或 LLM 不可用时回退为文档标题
+     * @return 实际落库的 golden query 条数
+     */
+    public int buildFromDocuments(String datasetId, int limit, boolean useLlm) {
+        if (datasetId == null || datasetId.isBlank()) {
+            log.warn("buildFromDocuments: datasetId 为空，跳过");
+            return 0;
+        }
+        if (limit <= 0) {
+            log.warn("buildFromDocuments: limit={} 非法（须为正），按 0 处理，不导入任何样本", limit);
+            return 0;
+        }
+
+        // 只取可用于评测的文档：COMPLETED（全链路成功）与 PARTIAL（分块已落库、部分索引成功）。
+        // 明确排除 PENDING(0) / PROCESSING(1) / FAILED(3)。
+        List<Integer> usableStatuses = List.of(
+                DocumentStatus.COMPLETED.getCode(),
+                DocumentStatus.PARTIAL.getCode());
+        List<Document> docs = documentMapper.selectList(
+                new LambdaQueryWrapper<Document>()
+                        .in(Document::getStatus, usableStatuses)
+                        .orderByDesc(Document::getCreatedAt)
+                        .last("LIMIT " + limit));
+
+        if (docs == null || docs.isEmpty()) {
+            log.warn("buildFromDocuments: 数据集 [{}] 没有可用文档（status ∈ {{COMPLETED, PARTIAL}}），不新增样本",
+                    datasetId);
+            return 0;
+        }
+
+        int imported = 0;
+        for (Document doc : docs) {
+            if (doc == null || doc.getId() == null) {
+                log.warn("buildFromDocuments: 跳过 id 为空的文档记录");
+                continue;
+            }
+
+            // 首个 chunk 作为 expectedAnswer 来源（真实文本，不做任何编造）
+            DocumentChunk firstChunk = documentChunkMapper.selectOne(
+                    new LambdaQueryWrapper<DocumentChunk>()
+                            .eq(DocumentChunk::getDocumentId, doc.getId())
+                            .orderByAsc(DocumentChunk::getChunkIndex)
+                            .last("LIMIT 1"));
+            String firstChunkText = firstChunk != null ? firstChunk.getContent() : null;
+            // 无 chunk 时 expectedAnswer 为空串（如实反映「没有正文」），绝不编造内容
+            String expectedAnswer = truncate(
+                    firstChunkText == null ? "" : firstChunkText, EXPECTED_ANSWER_MAX_LEN);
+
+            String title = doc.getTitle() != null && !doc.getTitle().isBlank()
+                    ? doc.getTitle()
+                    : ("文档 " + doc.getId());
+
+            String query = buildQuery(title, firstChunkText, useLlm);
+
+            // 复用 addGoldenQuery：内部走 goldenQueryMapper.insert 逐条落库（并回填自增 id）
+            addGoldenQuery(datasetId, query, expectedAnswer,
+                    serializeDocIds(List.of(String.valueOf(doc.getId()))),
+                    "medium", "文档构建");
+            imported++;
+        }
+
+        log.info("buildFromDocuments: 数据集 [{}] 从 {} 篇文档构建 {} 条 golden query（useLlm={}）",
+                datasetId, docs.size(), imported, useLlm);
+        return imported;
+    }
+
+    /**
+     * 生成一条 golden query 的问题文本。
+     * <p>
+     * {@code useLlm=true} 且 LLM 可用时用 LLM 从「标题 + 首 chunk」生成；
+     * 否则（{@code useLlm=false} / LLM 不可用 / 生成失败 / 返回空）一律回退为文档标题 ——
+     * 回退值是真实的文档标题，而非编造的假问题。
+     *
+     * @param title          文档标题（回退值）
+     * @param firstChunkText 首个 chunk 文本（可为 null）
+     * @param useLlm         是否允许调用 LLM
+     * @return 问题文本（LLM 生成或文档标题）
+     */
+    private String buildQuery(String title, String firstChunkText, boolean useLlm) {
+        if (!useLlm) {
+            return title;
+        }
+        if (modelProviderRouter == null || modelProviderRouter.activeProviderName() == null) {
+            log.warn("buildFromDocuments: LLM 不可用（无生效 provider），query 回退为文档标题");
+            return title;
+        }
+
+        String source = "标题：" + title
+                + (firstChunkText != null && !firstChunkText.isBlank()
+                ? "\n开头内容：" + truncate(firstChunkText, QUERY_SOURCE_MAX_LEN)
+                : "");
+        String prompt = String.format("""
+                下面是一篇知识库文档的标题与开头内容。请站在真实用户的角度，生成一个该用户会
+                提出、且仅凭这篇文档内容即可回答的中文问题。只输出问题本身，不要任何前缀、解释或引号。
+
+                ## 文档
+                %s
+
+                ## 问题
+                """, source);
+
+        try {
+            String generated = modelProviderRouter.chat(
+                    List.of(
+                            Map.of("role", "system",
+                                    "content", "你是一个 RAG 基准数据集构造助手，只输出一个问题。"),
+                            Map.of("role", "user", "content", prompt)),
+                    QUERY_GEN_TEMPERATURE, QUERY_GEN_MAX_TOKENS);
+            if (generated != null && !generated.isBlank()) {
+                return generated.strip();
+            }
+            log.warn("buildFromDocuments: LLM 返回空问题，回退为文档标题");
+        } catch (Exception e) {
+            log.warn("buildFromDocuments: LLM 生成问题失败（{}），回退为文档标题", e.getMessage());
+        }
+        return title;
     }
 
     /**
