@@ -178,6 +178,18 @@ openai:
 llm:
   provider: ${LLM_PROVIDER:glm}
 
+# ──────────────────────────────────────────────────────────────
+#  Agent 运行时（ReAct / Planner）
+#  agent.plan.use-llm 控制 ReAct 循环开始时的「计划分解」是否走 LLM：
+#  关闭或 LLM 不可用/解析失败时，PlanFactory 自动回退启发式计划，永不为空。
+#  注意：.env 是当作 properties 文件加载的，UPPER_SNAKE 键必须在此显式写
+#  ${KEY:default} 占位才会生效，否则是死配置。
+#  与评测口径 evaluation.benchmark.use-llm 相互独立，勿混用。
+# ──────────────────────────────────────────────────────────────
+agent:
+  plan:
+    use-llm: ${PLAN_USE_LLM:true}
+
 # 火山方舟（Ark）—— OpenAI 兼容端点。enabled=false 或 key 为空时优雅降级，不建连、不影响启动。
 ark:
   enabled: ${ARK_ENABLED:false}

@@ -1,9 +1,11 @@
 package com.agi.assistant.service.agent;
 
 import com.agi.assistant.config.OpenAIConfig;
+import com.agi.assistant.model.dto.ToolResult;
 import com.agi.assistant.model.entity.SearchResult;
 import com.agi.assistant.model.enums.TaskStatus;
 import com.agi.assistant.model.enums.ToolStatus;
+import com.agi.assistant.service.memory.PlanFactory;
 import com.agi.assistant.service.memory.RuntimeStateMemory;
 import com.agi.assistant.service.rag.HybridRetrievalService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -12,6 +14,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -55,11 +58,32 @@ public class ReactEngine {
     private final HybridRetrievalService hybridRetrievalService;
     private final OpenAIConfig openAIConfig;
     private final RuntimeStateMemory runtimeStateMemory;
+    private final PlanFactory planFactory;
     private final Map<String, List<ReActStep>> stepCache;
     private final ObjectMapper objectMapper;
 
+    /**
+     * Planner 分解是否允许走 LLM（对应 {@code agent.plan.use-llm}，默认 true）。
+     * <p>
+     * 与评测口径 {@code evaluation.benchmark.use-llm} 相互独立：那个键只控制评测流程，
+     * 不能拿来控制运行态 Planner，否则改评测配置会莫名改变线上推理行为。
+     * 关闭或 LLM 不可用时，{@link PlanFactory} 自动回退启发式计划。
+     */
+    @Value("${agent.plan.use-llm:true}")
+    private boolean planUseLlm = true;
+
     /** 当前请求的用户 ID，用于把 userId 透传给需要它的工具（如 memory_search） */
     private final ThreadLocal<Long> currentUserId = new ThreadLocal<>();
+
+    /**
+     * 最近一次工具执行的强类型结果（可能携带 {@link ToolStatus#PARTIAL} 截断标记）。
+     * <p>
+     * 截断发生在 {@link #observe(String)}（它拿到的是 String 观察结果），而
+     * {@link ToolResult} 只在 {@link #doAct(String, String)} 里短暂存在。用一个
+     * ThreadLocal 把「最近一次结果」串起来，{@code observe} 一旦截断就能就地
+     * {@link ToolResult#markPartial(String)}，让 PARTIAL 有真实赋值路径。
+     */
+    private final ThreadLocal<ToolResult> lastToolResult = new ThreadLocal<>();
 
     /**
      * 当前请求的会话 ID（运行态记忆的 key）。
@@ -75,12 +99,14 @@ public class ReactEngine {
                        ToolRegistry toolRegistry,
                        @Lazy HybridRetrievalService hybridRetrievalService,
                        OpenAIConfig openAIConfig,
-                       RuntimeStateMemory runtimeStateMemory) {
+                       RuntimeStateMemory runtimeStateMemory,
+                       PlanFactory planFactory) {
         this.openAiWebClient = openAiWebClient;
         this.toolRegistry = toolRegistry;
         this.hybridRetrievalService = hybridRetrievalService;
         this.openAIConfig = openAIConfig;
         this.runtimeStateMemory = runtimeStateMemory;
+        this.planFactory = planFactory;
         this.stepCache = new LinkedHashMap<>(100, 0.75f, true) {
             @Override
             protected boolean removeEldestEntry(Map.Entry<String, List<ReActStep>> eldest) {
@@ -177,10 +203,14 @@ public class ReactEngine {
 
         currentUserId.set(userId);
         currentSessionId.set(sessionId);
+        // 清掉复用线程上残留的上一次工具结果，避免 observe 误标到旧对象
+        lastToolResult.remove();
 
         String taskId = startRuntimeTask(sessionId, query);
         try {
             String answer = runLoop(query, maxIterations, taskId);
+            // 推理结束（正常收敛或达到迭代上限）→ 计划标记完成
+            completePlanIfPresent();
             finishRuntimeTask(sessionId, taskId, answer);
             return answer;
         } finally {
@@ -226,10 +256,63 @@ public class ReactEngine {
         }
     }
 
+    // ──────────────────────────────────────────────────────────────
+    //  Planner State 埋点（写侧）
+    // ──────────────────────────────────────────────────────────────
+    //  这三个方法补齐了 RuntimeStateMemory 计划层「只被读、从不被写」的缺口：
+    //    - 循环开始   → updatePlan（PlanFactory 产出有序步骤）
+    //    - 每轮迭代末 → advancePlanStep（推进当前步骤下标）
+    //    - 推理结束   → completePlan（标记计划完成）
+    //  全部 try-catch 包裹：埋点只是观测，写失败绝不能打断推理主流程。
+    //  sessionId 为 null（DAG 调用方 / 单测无会话）时直接跳过，绝不写脏数据。
+
+    /** 循环开始：生成并把计划写进运行态记忆。失败只记日志。 */
+    private void recordPlanStart(String query) {
+        String sessionId = currentSessionId.get();
+        if (sessionId == null || runtimeStateMemory == null || planFactory == null) {
+            return;
+        }
+        try {
+            List<String> steps = planFactory.build(query, planUseLlm);
+            runtimeStateMemory.updatePlan(sessionId, steps);
+        } catch (Exception e) {
+            log.debug("Failed to record planner state for session [{}]: {}", sessionId, e.getMessage());
+        }
+    }
+
+    /** 每轮迭代末：推进计划步骤下标。失败只记日志。 */
+    private void advancePlanStepIfPresent() {
+        String sessionId = currentSessionId.get();
+        if (sessionId == null || runtimeStateMemory == null) {
+            return;
+        }
+        try {
+            runtimeStateMemory.advancePlanStep(sessionId);
+        } catch (Exception e) {
+            log.debug("Failed to advance plan step for session [{}]: {}", sessionId, e.getMessage());
+        }
+    }
+
+    /** 推理结束：标记计划完成。失败只记日志。 */
+    private void completePlanIfPresent() {
+        String sessionId = currentSessionId.get();
+        if (sessionId == null || runtimeStateMemory == null) {
+            return;
+        }
+        try {
+            runtimeStateMemory.completePlan(sessionId);
+        } catch (Exception e) {
+            log.debug("Failed to complete plan for session [{}]: {}", sessionId, e.getMessage());
+        }
+    }
+
     private String runLoop(String query, int maxIterations, String taskId) {
         int iterations = Math.max(1, Math.min(maxIterations, 10));
         log.info("Starting ReAct loop: query='{}', maxIterations={}",
                 query.length() > 50 ? query.substring(0, 50) + "..." : query, iterations);
+
+        // 运行态埋点：循环开始即写入计划（失败不影响主流程）
+        recordPlanStart(query);
 
         List<ReActStep> steps = new ArrayList<>();
         StringBuilder context = new StringBuilder();
@@ -321,6 +404,9 @@ public class ReactEngine {
                     .build());
 
             context.append("Observation: ").append(processedObservation).append("\n\n");
+
+            // 运行态埋点：本轮迭代结束，推进计划步骤（失败不影响主流程）
+            advancePlanStepIfPresent();
         }
 
         // Max iterations reached
@@ -440,18 +526,23 @@ public class ReactEngine {
         try {
             Map<String, Object> paramMap = buildToolParams(params);
 
-            Map<String, Object> toolResult = toolRegistry.executeTool(action, paramMap, currentUserId.get());
+            // 强类型入口：拿到 ToolResult（携带 status / truncated / partialReason 语义），
+            // 旧 Map 约定里 "result" 即 content、"error" 即 error，行为完全等价。
+            ToolResult toolResult = toolRegistry.executeToolTyped(action, paramMap, currentUserId.get());
             if (toolResult != null) {
-                // 成功：注册表约定 handler 把可读文本放在 "result"
-                Object result = toolResult.get("result");
-                if (result != null) {
-                    return result.toString();
+                // 保留最近一次结果，供 observe 截断时就地打 PARTIAL 标记
+                lastToolResult.set(toolResult);
+
+                // 成功：注册表约定 handler 把可读文本放在 content（等价旧 Map 的 "result"）
+                String content = toolResult.getContent();
+                if (content != null) {
+                    return content;
                 }
                 // 失败：必须把 error 透出去。
                 // 修复前这里只检查 "result"，工具执行失败（返回 error 但不带 result）
                 // 会被当成「工具不存在」直接落到下面的内置分支，
                 // 最终给 LLM 的观察结果是 "Unknown action: knowledge_search" —— 完全误导。
-                Object error = toolResult.get("error");
+                String error = toolResult.getError();
                 if (error != null && toolRegistry.hasTool(action)) {
                     return "Tool [" + action + "] failed: " + error;
                 }
@@ -544,9 +635,46 @@ public class ReactEngine {
         // Truncate very long results to fit in context
         int maxLen = 2000;
         if (result.length() > maxLen) {
+            // 截断发生 → 给最近一次工具结果打 PARTIAL 标记（ToolStatus.PARTIAL 的真实赋值路径）
+            markLastToolResultPartial(result.length(), maxLen);
             return result.substring(0, maxLen) + "... [truncated, total " + result.length() + " chars]";
         }
         return result;
+    }
+
+    /**
+     * 把「最近一次工具结果」标记为 {@link ToolStatus#PARTIAL}。
+     * <p>
+     * 截断阈值（{@code 2000}）与截断行为保持不变，这里只是在截断发生时额外补一个状态标记，
+     * 让调用方能够区分「完整结果」与「被截断的部分结果」，并保留截断原因。
+     * 没有可标记的结果（如在 {@code doAct} 之外直接调用 {@link #observe(String)}）时静默跳过；
+     * 标记失败只记日志，绝不影响推理主流程。
+     *
+     * @param totalLength 截断前的原始长度
+     * @param keptLength  实际保留进上下文的长度
+     */
+    private void markLastToolResultPartial(int totalLength, int keptLength) {
+        ToolResult last = lastToolResult.get();
+        if (last == null) {
+            return;
+        }
+        try {
+            last.markPartial("工具结果被截断：原始 " + totalLength
+                    + " 字符，仅保留前 " + keptLength + " 字符进入上下文");
+        } catch (Exception e) {
+            log.debug("Failed to mark tool result as PARTIAL: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 最近一次工具执行的强类型结果（可能携带 {@link ToolStatus#PARTIAL} 截断标记）。
+     * <p>
+     * 供运行态观测 / 单测断言使用；每次 {@link #doAct(String, String)} 覆写，会话线程内有效。
+     *
+     * @return 最近一次 {@link ToolResult}；本次会话尚未执行任何工具时为 {@code null}
+     */
+    public ToolResult getLastToolResult() {
+        return lastToolResult.get();
     }
 
     /**
