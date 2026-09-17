@@ -201,12 +201,16 @@ app:
   chat:
     # 是否自动把 LLM 回答里的代码块丢进沙箱执行（有资源与安全成本，默认关）
     auto-execute-code-blocks: ${CHAT_AUTO_EXECUTE_CODE:false}
-    # 触发 ReAct 多步推理的最小消息长度
+    # 触发 ReAct 多步推理的最小消息长度（主触发条件）
     react-min-length: ${CHAT_REACT_MIN_LENGTH:300}
+    # 是否用「关键词命中」触发 ReAct（默认关：关键词表覆盖几乎所有自然提问）
+    react-keywords-enabled: ${CHAT_REACT_KEYWORDS_ENABLED:false}
+    # 是否用「≥2 个问号」触发 ReAct（默认关）
+    react-multi-question-enabled: ${CHAT_REACT_MULTI_QUESTION_ENABLED:false}
   sandbox:
     # 沙箱执行总开关。关闭时 /api/sandbox 直接返回未启用
     enabled: ${SANDBOX_ENABLED:true}
-    # 是否要求显式确认后执行（true 时需请求带 confirm=true）
+    # 是否要求显式确认后执行（true 时请求必须带 confirmed=true，否则拒绝并记审计）
     require-confirm: ${SANDBOX_REQUIRE_CONFIRM:false}
 
 # ──────────────────────────────────────────────────────────────

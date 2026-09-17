@@ -244,6 +244,10 @@ public class BuiltinToolRegistrar {
                     request.setLanguage(normalizeLanguage(language));
                     request.setCode(code);
                     request.setTimeout(timeout);
+                    // 工具调用路径视为「已确认」：它已经过 ToolRegistry 的风险分级
+                    // （run_code=WARN）与审计；sandbox.require-confirm 只拦直连 API
+                    // 的未确认请求
+                    request.setConfirmed(true);
 
                     SandboxExecuteResponse response = sandboxService.execute(request);
 

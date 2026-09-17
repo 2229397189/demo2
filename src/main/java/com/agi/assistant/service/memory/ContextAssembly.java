@@ -141,46 +141,15 @@ public class ContextAssembly {
     }
 
     /**
-     * Build a prompt string enriched with all available context.
-     * <p>
-     * Constructs a structured prompt that includes:
-     * - System instructions
-     * - User profile context
-     * - Relevant long-term memories
-     * - Graph knowledge
-     * - Retrieved document context
-     * - Recent conversation history
-     * - The current user query
-     *
-     * @param userId  the user identifier
-     * @param query   the user's current query
-     * @param memories the assembled context map (from assembleContext)
-     * @return a formatted prompt string ready for LLM consumption
-     */
-    @SuppressWarnings("unchecked")
-    public String buildPromptWithContext(Long userId, String query, Map<String, Object> memories) {
-        StringBuilder prompt = new StringBuilder();
-
-        // System instruction
-        prompt.append("你是一个智能学习助手，能够根据用户的记忆和知识库提供个性化帮助。\n\n");
-
-        // 各记忆层拼装（复用与 ChatServiceImpl 相同的逻辑）
-        prompt.append(buildMemorySection(memories, true, true));
-
-        // Current query
-        prompt.append("## 当前问题\n");
-        prompt.append(query).append("\n");
-
-        return prompt.toString();
-    }
-
-    /**
      * 只拼装「记忆 + 检索」段落，不含系统人设与当前问题。
      * <p>
      * 抽出来的原因：ChatServiceImpl 有自己的 system prompt 模板（{context}/{memory} 占位符）、
      * 也有自己的一套检索结果，不能再套一份人设和问题；但 runtimeState / userProfile /
      * graphMemoryChain / ragResults 这些上下文此前被 assembleContext 组装出来后无人消费，
      * 等于白查了一遍数据库和向量库。这里给一个「只出段落」的入口，让两边共用同一套渲染。
+     * <p>
+     * 说明：曾经的 {@code buildPromptWithContext(userId, query, memories)} 包装器
+     * 已删除 —— 它零调用方，留着只会让面试官问「这段谁在用」。
      *
      * @param memories     assembleContext 的产物
      * @param includeRag   是否渲染 ragResults（调用方若已有参考资料可传 false，避免重复列一遍）

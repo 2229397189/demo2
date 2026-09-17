@@ -362,10 +362,16 @@ public class BenchmarkDataset {
                             .eq(GoldenQuery::getDatasetId, sampleDatasetId));
         }
 
-        // 查询真实文档（最多取 5 篇）
+        // 查询真实文档（最多取 5 篇）。
+        // 修复：此前写死 eq(getStatus, 1)，而 1 是 PROCESSING —— 等于专挑「还在
+        // 处理中」的文档来建黄金查询（审计发现 D）。改用枚举语义：COMPLETED
+        // （全链路成功）与 PARTIAL（分块已落库、部分索引成功）都可用于评测。
+        List<Integer> usableStatuses = List.of(
+                DocumentStatus.COMPLETED.getCode(),
+                DocumentStatus.PARTIAL.getCode());
         List<Document> realDocs = documentMapper.selectList(
                 new LambdaQueryWrapper<Document>()
-                        .eq(Document::getStatus, 1)
+                        .in(Document::getStatus, usableStatuses)
                         .last("LIMIT 5"));
 
         if (realDocs.isEmpty()) {

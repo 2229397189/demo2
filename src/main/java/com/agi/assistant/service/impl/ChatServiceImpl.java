@@ -110,6 +110,21 @@ public class ChatServiceImpl implements ChatService {
     @Value("${app.chat.auto-execute-code-blocks:false}")
     private boolean autoExecuteCodeBlocksR;
 
+    /**
+     * 是否用「关键词命中」触发 ReAct（默认关）。
+     * <p>
+     * 修复说明（P2-3）：下面的关键词表覆盖了「分析/对比/为什么/如何/explain…」
+     * —— 几乎所有自然提问都会命中，加上「≥2 个问号」条件，ReAct 实际上
+     * 对大多数问题都会触发：每次要多轮 LLM 调用、且跳过流式输出。
+     * 现在长度阈值仍是主触发条件（可配），这两个激进条件改为显式开启才生效。
+     */
+    @Value("${app.chat.react-keywords-enabled:false}")
+    private boolean reactKeywordsEnabled;
+
+    /** 是否用「≥2 个问号」触发 ReAct（默认关） */
+    @Value("${app.chat.react-multi-question-enabled:false}")
+    private boolean reactMultiQuestionEnabled;
+
     /** 复杂问题关键词 */
     private static final List<String> COMPLEX_KEYWORDS = List.of(
             "分析", "对比", "比较", "总结", "归纳", "推理", "为什么",
@@ -811,9 +826,14 @@ public class ChatServiceImpl implements ChatService {
      * 判断是否为复杂问题，需要 ReAct 多步推理。
      * <p>
      * 判定条件（满足任一即为复杂）：
-     * 1. 消息长度超过阈值
-     * 2. 包含复杂问题关键词
-     * 3. 包含多个问号
+     * 1. 消息长度超过阈值（主条件，阈值来自 app.chat.react-min-length）
+     * 2. 包含复杂问题关键词（默认关闭，见 app.chat.react-keywords-enabled）
+     * 3. 包含多个问号（默认关闭，见 app.chat.react-multi-question-enabled）
+     * <p>
+     * 修复说明（P2-3）：条件 2/3 此前无条件生效 —— 关键词表里是
+     * 「如何/为什么/explain」这类日常词，导致几乎每个提问都走 ReAct：
+     * 多轮 LLM 调用 + 跳过流式输出，延迟与成本双输。现在默认只按长度触发，
+     * 需要更激进的触发策略时由配置显式打开。
      */
     private boolean isComplexQuery(String message) {
         if (message == null) return false;
@@ -823,18 +843,22 @@ public class ChatServiceImpl implements ChatService {
             return true;
         }
 
-        // 条件 2：包含复杂问题关键词
-        String lower = message.toLowerCase();
-        for (String keyword : COMPLEX_KEYWORDS) {
-            if (lower.contains(keyword)) {
-                return true;
+        // 条件 2：包含复杂问题关键词（默认关闭）
+        if (reactKeywordsEnabled) {
+            String lower = message.toLowerCase();
+            for (String keyword : COMPLEX_KEYWORDS) {
+                if (lower.contains(keyword)) {
+                    return true;
+                }
             }
         }
 
-        // 条件 3：多个问号（多子问题）
-        long questionMarks = message.chars().filter(c -> c == '?' || c == '？').count();
-        if (questionMarks >= 2) {
-            return true;
+        // 条件 3：多个问号（默认关闭）
+        if (reactMultiQuestionEnabled) {
+            long questionMarks = message.chars().filter(c -> c == '?' || c == '？').count();
+            if (questionMarks >= 2) {
+                return true;
+            }
         }
 
         return false;

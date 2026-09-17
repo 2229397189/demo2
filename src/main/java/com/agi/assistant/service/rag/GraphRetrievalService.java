@@ -185,7 +185,7 @@ public class GraphRetrievalService {
         List<SearchResult> allResults = new ArrayList<>();
 
         try (Session session = neo4jDriver.session()) {
-            // 实体 -> 文档块 的边统一为 MENTIONS（由 writeGraph 建立）。
+            // 实体 -> 文档块 的边统一为 MENTIONS（由 buildGraph → persistGraph 建立）。
             // 旧版本只写 Entity 节点、从不创建 DocumentChunk 节点，
             // 所以这条查询此前永远返回空集。
             String cypher =
@@ -448,51 +448,6 @@ public class GraphRetrievalService {
         log.info("Graph built for document [{}]: {} entities, {} relations, {} mention edges ({} chunks scanned)",
                 documentId, entities.size(), relations.size(), mentions, limited.size());
         return mentions;
-    }
-
-    /**
-     * 将实体和关系写入知识图谱（不含文档块节点，保留给外部调用方）。
-     *
-     * @param entities  实体列表
-     * @param relations 关系列表
-     * @param documentId 关联文档 ID
-     */
-    public void writeGraph(List<GraphEntity> entities, List<GraphRelation> relations, String documentId) {
-        if (neo4jDriver == null) {
-            throw new IllegalStateException("Neo4j not available, cannot write graph");
-        }
-        if ((entities == null || entities.isEmpty()) && (relations == null || relations.isEmpty())) {
-            return;
-        }
-
-        List<Map<String, Object>> rawEntities = new ArrayList<>();
-        if (entities != null) {
-            for (GraphEntity entity : entities) {
-                if (entity == null || entity.getName() == null || entity.getName().isBlank()) {
-                    continue;
-                }
-                Map<String, Object> m = new HashMap<>();
-                m.put("name", entity.getName());
-                m.put("type", entity.getType());
-                rawEntities.add(m);
-            }
-        }
-
-        List<Map<String, Object>> rawRelations = new ArrayList<>();
-        if (relations != null) {
-            for (GraphRelation relation : relations) {
-                if (relation == null || relation.getStartEntity() == null || relation.getEndEntity() == null) {
-                    continue;
-                }
-                Map<String, Object> m = new HashMap<>();
-                m.put("source", relation.getStartEntity());
-                m.put("target", relation.getEndEntity());
-                m.put("type", relation.getType());
-                rawRelations.add(m);
-            }
-        }
-
-        persistGraph(documentId, rawEntities, rawRelations, Collections.emptyList());
     }
 
     // ──────────────────────────────────────────────────────────────
