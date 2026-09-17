@@ -1,5 +1,6 @@
 package com.agi.assistant.service.rag;
 
+import com.agi.assistant.model.entity.DocumentChunk;
 import com.agi.assistant.model.entity.GraphEntity;
 import com.agi.assistant.model.entity.GraphRelation;
 import com.agi.assistant.model.entity.SearchResult;
@@ -9,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.neo4j.driver.Driver;
 import org.neo4j.driver.Record;
 import org.neo4j.driver.Result;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.lang.Nullable;
@@ -24,9 +26,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -50,6 +54,15 @@ public class GraphRetrievalService {
     /** 每跳最大扩展实体数 */
     private static final int MAX_ENTITIES_PER_HOP = 10;
 
+    /** 单次实体抽取调用的最大字符数：把多个块聚成一批，减少 LLM 调用次数 */
+    private static final int EXTRACTION_BATCH_CHARS = 3000;
+
+    /** 实体名短于该长度不建立 MENTIONS 边，避免「它」「此」这类词造成边爆炸 */
+    private static final int MIN_MENTION_ENTITY_LENGTH = 2;
+
+    /** 单文档 MENTIONS 边上限，防止异常抽取把图撑爆 */
+    private static final int MAX_MENTIONS_PER_DOCUMENT = 2000;
+
     /** 实体抽取提示词 */
     private static final String ENTITY_EXTRACTION_PROMPT =
             "请从以下文本中抽取所有实体（人名、组织、概念、工具、技术等）和它们之间的关系。\n" +
@@ -62,6 +75,14 @@ public class GraphRetrievalService {
     private final WebClient llmWebClient;
     private final ObjectMapper objectMapper;
     private final OpenAIConfig openAIConfig;
+
+    /** 文档入库时是否构建知识图谱（每篇文档会触发若干次 LLM 实体抽取调用） */
+    @Value("${rag.graph-extraction.enabled:true}")
+    private boolean graphExtractionEnabled;
+
+    /** 单篇文档参与图谱构建的块数上限，控制 LLM 成本 */
+    @Value("${rag.graph-extraction.max-chunks:40}")
+    private int graphExtractionMaxChunks;
 
     public GraphRetrievalService(@Nullable Driver neo4jDriver, OpenAIConfig openAIConfig) {
         this.neo4jDriver = neo4jDriver;
@@ -163,20 +184,11 @@ public class GraphRetrievalService {
         List<SearchResult> allResults = new ArrayList<>();
 
         try (Session session = neo4jDriver.session()) {
-            // 查询实体节点以及通过关系连接到的文档块
+            // 实体 -> 文档块 的边统一为 MENTIONS（由 writeGraph 建立）。
+            // 旧版本只写 Entity 节点、从不创建 DocumentChunk 节点，
+            // 所以这条查询此前永远返回空集。
             String cypher =
-                    "MATCH (e:Entity)-[r*1..2]-(c:DocumentChunk)\n" +
-                    "WHERE e.name IN $names\n" +
-                    "RETURN DISTINCT c.document_id AS documentId, " +
-                    "c.chunk_index AS chunkIndex, " +
-                    "c.content AS content, " +
-                    "e.name AS entityName, " +
-                    "type(relationships(path)[0]) AS relationType\n" +
-                    "LIMIT $limit";
-
-            // 使用简化查询代替路径查询
-            String simpleCypher =
-                    "MATCH (e:Entity)-[r]-(c:DocumentChunk)\n" +
+                    "MATCH (e:Entity)-[:MENTIONS]-(c:DocumentChunk)\n" +
                     "WHERE e.name IN $names\n" +
                     "RETURN DISTINCT c.document_id AS documentId, " +
                     "c.chunk_index AS chunkIndex, " +
@@ -186,17 +198,22 @@ public class GraphRetrievalService {
 
             Map<String, Object> params = Map.of("names", entityNames, "limit", topK);
 
-            Result result = session.run(simpleCypher, params);
+            Result result = session.run(cypher, params);
 
             while (result.hasNext()) {
                 Record record = result.next();
+                String documentId = record.get("documentId").asString(null);
+                String content = record.get("content").asString(null);
+                if (documentId == null || content == null) {
+                    continue;
+                }
                 SearchResult searchResult = SearchResult.builder()
-                        .documentId(record.get("documentId").asString())
-                        .chunkIndex(record.get("chunkIndex").asInt())
-                        .content(record.get("content").asString())
+                        .documentId(documentId)
+                        .chunkIndex(record.get("chunkIndex").asInt(0))
+                        .content(content)
                         .score(1.0)  // 图检索默认分数
                         .source("graph")
-                        .metadata(Map.of("entity", record.get("entityName").asString()))
+                        .metadata(Map.of("entity", String.valueOf(record.get("entityName").asString(null))))
                         .build();
                 allResults.add(searchResult);
             }
@@ -230,65 +247,84 @@ public class GraphRetrievalService {
 
         Set<String> visitedEntities = new HashSet<>(startEntities);
         List<String> currentFrontier = new ArrayList<>(startEntities);
-        List<SearchResult> allResults = new ArrayList<>();
+
+        // 用 LinkedHashMap 去重：同一 (documentId, chunkIndex) 在多跳中可能被多次命中，
+        // 旧实现直接往 ArrayList 里堆，导致重复结果把 topK 挤满。
+        Map<String, SearchResult> collected = new LinkedHashMap<>();
 
         try (Session session = neo4jDriver.session()) {
             for (int hop = 0; hop < hopCount && !currentFrontier.isEmpty(); hop++) {
-                List<String> nextFrontier = new ArrayList<>();
+                double score = 1.0 / (hop + 1);  // 跳数越远分数越低
 
-                // 查询当前边界实体的邻居实体和关联文档块
-                String cypher =
-                        "MATCH (e:Entity)-[r]-(neighbor)\n" +
+                // (a) 收集当前边界实体「直接提及」的文档块
+                String chunkCypher =
+                        "MATCH (e:Entity)-[:MENTIONS]->(c:DocumentChunk)\n" +
                         "WHERE e.name IN $names\n" +
-                        "RETURN e.name AS sourceEntity, " +
-                        "type(r) AS relationType, " +
-                        "labels(neighbor) AS neighborLabels, " +
-                        "neighbor.name AS neighborName, " +
-                        "neighbor.document_id AS documentId, " +
-                        "neighbor.chunk_index AS chunkIndex, " +
-                        "neighbor.content AS content\n" +
+                        "RETURN DISTINCT c.document_id AS documentId, " +
+                        "c.chunk_index AS chunkIndex, " +
+                        "c.content AS content, " +
+                        "e.name AS entityName\n" +
                         "LIMIT $limit";
 
-                Map<String, Object> params = Map.of(
+                Map<String, Object> chunkParams = Map.of(
+                        "names", currentFrontier,
+                        "limit", MAX_ENTITIES_PER_HOP * currentFrontier.size() * 5
+                );
+
+                Result chunkResult = session.run(chunkCypher, chunkParams);
+                while (chunkResult.hasNext()) {
+                    Record record = chunkResult.next();
+                    String documentId = record.get("documentId").asString(null);
+                    String content = record.get("content").asString(null);
+                    if (documentId == null || content == null) {
+                        continue;
+                    }
+                    int chunkIndex = record.get("chunkIndex").asInt(0);
+                    String key = documentId + ":" + chunkIndex;
+
+                    SearchResult candidate = SearchResult.builder()
+                            .documentId(documentId)
+                            .chunkIndex(chunkIndex)
+                            .content(content)
+                            .score(score)
+                            .source("graph")
+                            .metadata(Map.of(
+                                    "hop", hop + 1,
+                                    "entity", String.valueOf(record.get("entityName").asString(null))
+                            ))
+                            .build();
+
+                    collected.merge(key, candidate,
+                            (existing, incoming) -> incoming.getScore() > existing.getScore() ? incoming : existing);
+                }
+
+                // (b) 仅沿「实体 -> 实体」关系扩展下一跳。
+                //     旧实现把 DocumentChunk 邻居也当成实体塞进 frontier，
+                //     下一跳再去匹配 e.name 时永远匹配不到，多跳实际只走了 1 跳。
+                String expandCypher =
+                        "MATCH (e:Entity)-[r]-(n:Entity)\n" +
+                        "WHERE e.name IN $names\n" +
+                        "RETURN DISTINCT n.name AS neighborName\n" +
+                        "LIMIT $limit";
+
+                Map<String, Object> expandParams = Map.of(
                         "names", currentFrontier,
                         "limit", MAX_ENTITIES_PER_HOP * currentFrontier.size()
                 );
 
-                Result result = session.run(cypher, params);
-
-                while (result.hasNext()) {
-                    Record record = result.next();
-                    String neighborName = record.get("neighborName").asString();
-
-                    // 记录新发现的实体
+                Result expandResult = session.run(expandCypher, expandParams);
+                List<String> nextFrontier = new ArrayList<>();
+                while (expandResult.hasNext()) {
+                    String neighborName = expandResult.next().get("neighborName").asString(null);
                     if (neighborName != null && !neighborName.isBlank()
-                            && !visitedEntities.contains(neighborName)) {
-                        visitedEntities.add(neighborName);
+                            && visitedEntities.add(neighborName)) {
                         nextFrontier.add(neighborName);
-                    }
-
-                    // 如果邻居是文档块，加入结果
-                    if (!record.get("documentId").isNull() && !record.get("content").isNull()) {
-                        double score = 1.0 / (hop + 1);  // 跳数越远分数越低
-                        SearchResult searchResult = SearchResult.builder()
-                                .documentId(record.get("documentId").asString())
-                                .chunkIndex(record.get("chunkIndex").asInt())
-                                .content(record.get("content").asString())
-                                .score(score)
-                                .source("graph")
-                                .metadata(Map.of(
-                                        "hop", hop + 1,
-                                        "sourceEntity", record.get("sourceEntity").asString(),
-                                        "relationType", record.get("relationType").asString()
-                                ))
-                                .build();
-                        allResults.add(searchResult);
                     }
                 }
 
                 currentFrontier = nextFrontier;
-                log.debug("Hop {}: discovered {} new entities, total results={}",
-                        hop + 1, nextFrontier.size(), allResults.size());
+                log.debug("Hop {}: discovered {} new entities, collected {} chunks",
+                        hop + 1, nextFrontier.size(), collected.size());
             }
 
         } catch (Exception e) {
@@ -296,6 +332,7 @@ public class GraphRetrievalService {
         }
 
         // 按分数排序并截断
+        List<SearchResult> allResults = new ArrayList<>(collected.values());
         allResults.sort((a, b) -> Double.compare(b.getScore(), a.getScore()));
         return allResults.size() > topK ? allResults.subList(0, topK) : allResults;
     }
@@ -356,8 +393,64 @@ public class GraphRetrievalService {
     //  图谱写入
     // ──────────────────────────────────────────────────────────────
 
+    /** Neo4j 是否可用（未配置时 driver 为 null）。 */
+    public boolean isAvailable() {
+        return neo4jDriver != null;
+    }
+
+    /** 文档入库时的图谱构建开关是否打开。 */
+    public boolean isExtractionEnabled() {
+        return graphExtractionEnabled;
+    }
+
     /**
-     * 将实体和关系写入知识图谱。
+     * 文档入库流水线的图谱构建入口：抽取实体/关系 + 建 Entity/DocumentChunk 节点 + MENTIONS 边。
+     * <p>
+     * 这是此前完全缺失的一环 —— writeGraph 从来没有被任何代码调用过，
+     * 而 graphSearch 却在查 {@code (e:Entity)-[r]-(c:DocumentChunk)}，
+     * 于是图谱检索永远返回空集。
+     * <p>
+     * 失败时抛异常，由调用方决定上报 PARTIAL 还是 FAILED（不再静默吞掉）。
+     *
+     * @param documentId 文档 ID（字符串形式）
+     * @param chunks     已分块的文档内容
+     * @return 实际写入的 MENTIONS 边数量
+     */
+    public int buildGraph(String documentId, List<DocumentChunk> chunks) {
+        if (neo4jDriver == null) {
+            throw new IllegalStateException("Neo4j 不可用，无法构建知识图谱");
+        }
+        if (chunks == null || chunks.isEmpty()) {
+            return 0;
+        }
+
+        List<DocumentChunk> limited = chunks.size() > graphExtractionMaxChunks
+                ? new ArrayList<>(chunks.subList(0, graphExtractionMaxChunks))
+                : chunks;
+
+        // 合并抽取结果（跨批次去重）
+        List<Map<String, Object>> entities = new ArrayList<>();
+        List<Map<String, Object>> relations = new ArrayList<>();
+        Set<String> seenEntityNames = new HashSet<>();
+        Set<String> seenRelationKeys = new HashSet<>();
+
+        for (List<DocumentChunk> batch : batchChunks(limited, EXTRACTION_BATCH_CHARS)) {
+            StringBuilder text = new StringBuilder();
+            for (DocumentChunk c : batch) {
+                text.append(c.getContent() == null ? "" : c.getContent()).append('\n');
+            }
+            Map<String, Object> extracted = extractEntities(text.toString());
+            mergeExtraction(extracted, entities, relations, seenEntityNames, seenRelationKeys);
+        }
+
+        int mentions = persistGraph(documentId, entities, relations, limited);
+        log.info("Graph built for document [{}]: {} entities, {} relations, {} mention edges ({} chunks scanned)",
+                documentId, entities.size(), relations.size(), mentions, limited.size());
+        return mentions;
+    }
+
+    /**
+     * 将实体和关系写入知识图谱（不含文档块节点，保留给外部调用方）。
      *
      * @param entities  实体列表
      * @param relations 关系列表
@@ -365,57 +458,226 @@ public class GraphRetrievalService {
      */
     public void writeGraph(List<GraphEntity> entities, List<GraphRelation> relations, String documentId) {
         if (neo4jDriver == null) {
-            log.warn("Neo4j not available, skipping graph write");
-            return;
+            throw new IllegalStateException("Neo4j not available, cannot write graph");
         }
         if ((entities == null || entities.isEmpty()) && (relations == null || relations.isEmpty())) {
             return;
         }
 
+        List<Map<String, Object>> rawEntities = new ArrayList<>();
+        if (entities != null) {
+            for (GraphEntity entity : entities) {
+                if (entity == null || entity.getName() == null || entity.getName().isBlank()) {
+                    continue;
+                }
+                Map<String, Object> m = new HashMap<>();
+                m.put("name", entity.getName());
+                m.put("type", entity.getType());
+                rawEntities.add(m);
+            }
+        }
+
+        List<Map<String, Object>> rawRelations = new ArrayList<>();
+        if (relations != null) {
+            for (GraphRelation relation : relations) {
+                if (relation == null || relation.getStartEntity() == null || relation.getEndEntity() == null) {
+                    continue;
+                }
+                Map<String, Object> m = new HashMap<>();
+                m.put("source", relation.getStartEntity());
+                m.put("target", relation.getEndEntity());
+                m.put("type", relation.getType());
+                rawRelations.add(m);
+            }
+        }
+
+        persistGraph(documentId, rawEntities, rawRelations, Collections.emptyList());
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  图谱写入内部方法
+    // ──────────────────────────────────────────────────────────────
+
+    /**
+     * 把块列表按累计字符数聚成批，控制单次抽取的 prompt 长度。
+     */
+    private List<List<DocumentChunk>> batchChunks(List<DocumentChunk> chunks, int maxChars) {
+        List<List<DocumentChunk>> batches = new ArrayList<>();
+        List<DocumentChunk> current = new ArrayList<>();
+        int currentChars = 0;
+
+        for (DocumentChunk chunk : chunks) {
+            int len = chunk.getContent() == null ? 0 : chunk.getContent().length();
+            if (!current.isEmpty() && currentChars + len > maxChars) {
+                batches.add(current);
+                current = new ArrayList<>();
+                currentChars = 0;
+            }
+            current.add(chunk);
+            currentChars += len;
+        }
+        if (!current.isEmpty()) {
+            batches.add(current);
+        }
+        return batches;
+    }
+
+    /**
+     * 合并一次抽取结果到全局集合，按名称/三元组去重。
+     */
+    @SuppressWarnings("unchecked")
+    private void mergeExtraction(Map<String, Object> extracted,
+                                 List<Map<String, Object>> entities,
+                                 List<Map<String, Object>> relations,
+                                 Set<String> seenEntityNames,
+                                 Set<String> seenRelationKeys) {
+        if (extracted == null) {
+            return;
+        }
+
+        Object rawEntities = extracted.get("entities");
+        if (rawEntities instanceof List<?> list) {
+            for (Object item : list) {
+                if (!(item instanceof Map)) {
+                    continue;
+                }
+                Map<String, Object> e = (Map<String, Object>) item;
+                String name = str(e.get("name"));
+                if (name == null || !seenEntityNames.add(name)) {
+                    continue;
+                }
+                Map<String, Object> clean = new HashMap<>();
+                clean.put("name", name);
+                clean.put("type", str(e.get("type")));
+                entities.add(clean);
+            }
+        }
+
+        Object rawRelations = extracted.get("relations");
+        if (rawRelations instanceof List<?> list) {
+            for (Object item : list) {
+                if (!(item instanceof Map)) {
+                    continue;
+                }
+                Map<String, Object> r = (Map<String, Object>) item;
+                String source = str(r.get("source"));
+                String target = str(r.get("target"));
+                if (source == null || target == null) {
+                    continue;
+                }
+                String type = str(r.get("type"));
+                String key = source + "|" + type + "|" + target;
+                if (!seenRelationKeys.add(key)) {
+                    continue;
+                }
+                Map<String, Object> clean = new HashMap<>();
+                clean.put("source", source);
+                clean.put("target", target);
+                clean.put("type", type);
+                relations.add(clean);
+            }
+        }
+    }
+
+    /**
+     * 在单个写事务中落库：Entity 节点、DocumentChunk 节点、MENTIONS 边、实体关系边。
+     *
+     * @return 写入的 MENTIONS 边数量
+     */
+    private int persistGraph(String documentId,
+                             List<Map<String, Object>> entities,
+                             List<Map<String, Object>> relations,
+                             List<DocumentChunk> chunks) {
+        AtomicInteger mentionCount = new AtomicInteger(0);
+
         try (Session session = neo4jDriver.session()) {
-            // 写入实体节点
-            if (entities != null) {
-                for (GraphEntity entity : entities) {
-                    String cypher =
-                            "MERGE (e:Entity {name: $name})\n" +
-                            "SET e.type = $type, e.document_id = $documentId\n" +
-                            "RETURN e";
-                    Map<String, Object> params = Map.of(
-                            "name", entity.getName(),
-                            "type", entity.getType() != null ? entity.getType() : "Unknown",
-                            "documentId", documentId != null ? documentId : ""
-                    );
-                    session.run(cypher, params);
+            // 一个文档一个写事务，避免 N 条语句 = N 个事务
+            session.executeWrite(tx -> {
+                // 1. 实体节点
+                for (Map<String, Object> e : entities) {
+                    tx.run("MERGE (e:Entity {name: $name}) " +
+                           "SET e.type = $type, e.document_id = $documentId",
+                            Map.of("name", e.get("name"),
+                                   "type", e.get("type") != null ? e.get("type") : "Unknown",
+                                   "documentId", documentId));
                 }
-            }
 
-            // 写入关系
-            if (relations != null) {
-                for (GraphRelation relation : relations) {
-                    String cypher =
-                            "MATCH (a:Entity {name: $source})\n" +
-                            "MATCH (b:Entity {name: $target})\n" +
-                            "MERGE (a)-[r:" + sanitizeRelationType(relation.getType()) + "]->(b)\n" +
-                            "SET r.document_id = $documentId\n" +
-                            "RETURN type(r)";
-                    Map<String, Object> params = Map.of(
-                            "source", relation.getStartEntity(),
-                            "target", relation.getEndEntity(),
-                            "documentId", documentId != null ? documentId : ""
-                    );
-                    session.run(cypher, params);
+                // 2. 文档块节点（graphSearch / multiHopExpand 依赖这里的 document_id / chunk_index / content）
+                for (DocumentChunk chunk : chunks) {
+                    int idx = chunk.getChunkIndex() != null ? chunk.getChunkIndex() : 0;
+                    tx.run("MERGE (c:DocumentChunk {document_id: $documentId, chunk_index: $chunkIndex}) " +
+                           "SET c.content = $content",
+                            Map.of("documentId", documentId,
+                                   "chunkIndex", (long) idx,
+                                   "content", chunk.getContent() != null ? chunk.getContent() : ""));
                 }
-            }
 
-            log.debug("Wrote {} entities and {} relations for document [{}]",
-                    entities != null ? entities.size() : 0,
-                    relations != null ? relations.size() : 0,
-                    documentId);
+                // 3. MENTIONS 边：靠子串命中把实体挂到它实际出现的块上
+                //    （抽取是分批做的，无法直接从 LLM 输出还原「哪个实体出现在哪个块」）
+                boolean budgetLeft = true;
+                for (Map<String, Object> e : entities) {
+                    String name = (String) e.get("name");
+                    if (name == null || name.length() < MIN_MENTION_ENTITY_LENGTH) {
+                        continue;
+                    }
+                    for (DocumentChunk chunk : chunks) {
+                        if (mentionCount.get() >= MAX_MENTIONS_PER_DOCUMENT) {
+                            budgetLeft = false;
+                            break;
+                        }
+                        String content = chunk.getContent();
+                        if (content == null || !content.contains(name)) {
+                            continue;
+                        }
+                        int idx = chunk.getChunkIndex() != null ? chunk.getChunkIndex() : 0;
+                        tx.run("MATCH (e:Entity {name: $name}) " +
+                               "MATCH (c:DocumentChunk {document_id: $documentId, chunk_index: $chunkIndex}) " +
+                               "MERGE (e)-[m:MENTIONS]->(c) " +
+                               "SET m.document_id = $documentId",
+                                Map.of("name", name,
+                                       "documentId", documentId,
+                                       "chunkIndex", (long) idx));
+                        mentionCount.incrementAndGet();
+                    }
+                    if (!budgetLeft) {
+                        log.warn("MENTIONS 边达到上限 {}，文档 [{}] 剩余实体跳过建边",
+                                MAX_MENTIONS_PER_DOCUMENT, documentId);
+                        break;
+                    }
+                }
+
+                // 4. 实体关系边。用 MERGE 建端点，保证关系里出现但未列入 entities 的实体也能落库
+                //    （旧实现用 MATCH，端点缺失时关系被静默丢弃）
+                for (Map<String, Object> r : relations) {
+                    tx.run("MERGE (a:Entity {name: $source}) " +
+                           "MERGE (b:Entity {name: $target}) " +
+                           "MERGE (a)-[rel:" + sanitizeRelationType((String) r.get("type")) + "]->(b) " +
+                           "SET rel.document_id = $documentId",
+                            Map.of("source", r.get("source"),
+                                   "target", r.get("target"),
+                                   "documentId", documentId));
+                }
+
+                return null;
+            });
 
         } catch (Exception e) {
-            log.error("Failed to write graph for document [{}]: {}", documentId, e.getMessage(), e);
+            log.error("Failed to persist graph for document [{}]: {}", documentId, e.getMessage(), e);
             throw new RuntimeException("Failed to write to knowledge graph", e);
         }
+
+        return mentionCount.get();
+    }
+
+    /**
+     * 取字符串值，空串归一为 null。
+     */
+    private String str(Object value) {
+        if (value == null) {
+            return null;
+        }
+        String s = String.valueOf(value).trim();
+        return s.isEmpty() ? null : s;
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -477,14 +739,19 @@ public class GraphRetrievalService {
 
     /**
      * 清洗关系类型字符串，使其可用于 Cypher 关系类型标签。
-     * 只保留字母数字和下划线，转换为大写。
+     * 只保留字母数字和下划线，转换为大写；数字开头补前缀，全空则回落 RELATED_TO。
      */
     private String sanitizeRelationType(String type) {
         if (type == null || type.isBlank()) {
             return "RELATED_TO";
         }
-        return type.replaceAll("[^a-zA-Z0-9_\\s]", "")
+        String sanitized = type.replaceAll("[^a-zA-Z0-9_\\s]", "")
                 .replaceAll("\\s+", "_")
                 .toUpperCase();
+        if (sanitized.isBlank()) {
+            return "RELATED_TO";
+        }
+        // Cypher 关系类型不能以数字开头
+        return Character.isDigit(sanitized.charAt(0)) ? "R_" + sanitized : sanitized;
     }
 }

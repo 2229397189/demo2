@@ -115,9 +115,15 @@ rag:
   initializer:
     enabled: ${RAG_INITIALIZER_ENABLED:true}
   # ES 索引分词器：装了 analysis-ik 插件后可改成 ik_max_word / ik_smart
+  # 注意：分词器写在字段 mapping 里，已存在的索引需要删除重建才会生效
   analyzer:
     index: ${ES_INDEX_ANALYZER:standard}
     search: ${ES_SEARCH_ANALYZER:standard}
+  # 文档入库时的知识图谱构建（实体抽取 -> Entity/DocumentChunk 节点 -> MENTIONS 边）
+  # 每篇文档会按 max-chunks 的规模触发若干次 LLM 抽取调用，成本敏感时可关闭
+  graph-extraction:
+    enabled: ${RAG_GRAPH_EXTRACTION_ENABLED:true}
+    max-chunks: ${RAG_GRAPH_EXTRACTION_MAX_CHUNKS:40}
 
 # Milvus
 milvus:

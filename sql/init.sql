@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS `document` (
     `file_type` VARCHAR(32) COMMENT 'markdown/pdf/txt/html',
     `file_size` BIGINT DEFAULT 0,
     `chunk_count` INT DEFAULT 0,
-    `status` TINYINT DEFAULT 0 COMMENT '0-待处理 1-处理中 2-已完成 3-失败',
+    `status` TINYINT DEFAULT 0 COMMENT '0-待处理 1-处理中 2-已完成 3-失败 4-部分完成',
+    `error_message` VARCHAR(1024) COMMENT '最近一次处理的错误/降级说明',
     `tags` VARCHAR(512),
     `source` VARCHAR(255) COMMENT '来源URL或路径',
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -61,6 +62,25 @@ CREATE TABLE IF NOT EXISTS `document` (
     INDEX `idx_user_id` (`user_id`),
     INDEX `idx_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文档表';
+
+-- ──────────────────────────────────────────────────────────────
+-- 幂等迁移：document.error_message
+-- CREATE TABLE IF NOT EXISTS 不会修改已存在的表结构，旧库需要显式补列。
+-- 先查 information_schema 再动态执行，保证脚本可重复运行
+-- （spring.sql.init.mode=always，每次启动都会执行本文件）。
+-- 注意：此处字符串字面量刻意避免出现转义引号 ''，
+--       因为 Spring ScriptUtils 按简单开关追踪引号，转义引号会让它误判语句边界。
+-- ──────────────────────────────────────────────────────────────
+SET @ddl := (SELECT IF(COUNT(*) = 0,
+                       'ALTER TABLE `document` ADD COLUMN `error_message` VARCHAR(1024) NULL',
+                       'SELECT 1')
+             FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = 'document'
+               AND COLUMN_NAME = 'error_message');
+PREPARE mig_document_error_message FROM @ddl;
+EXECUTE mig_document_error_message;
+DEALLOCATE PREPARE mig_document_error_message;
 
 -- 文档分块表
 CREATE TABLE IF NOT EXISTS `document_chunk` (

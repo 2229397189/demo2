@@ -13,6 +13,7 @@ import com.agi.assistant.service.rag.BM25Service;
 import com.agi.assistant.service.rag.ChunkService;
 import com.agi.assistant.service.rag.DocumentParser;
 import com.agi.assistant.service.rag.EmbeddingService;
+import com.agi.assistant.service.rag.GraphRetrievalService;
 import com.agi.assistant.service.rag.MilvusService;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -20,6 +21,7 @@ import org.apache.tika.Tika;
 import org.apache.tika.exception.TikaException;
 import org.springframework.context.annotation.Lazy;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -37,7 +39,6 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 /**
  * DocumentService implementation.
@@ -61,6 +62,7 @@ public class DocumentServiceImpl implements DocumentService {
     private final EmbeddingService embeddingService;
     private final MilvusService milvusService;
     private final BM25Service bm25Service;
+    private final GraphRetrievalService graphRetrievalService;
 
     @Value("${app.upload.dir:./uploads}")
     private String uploadDir;
@@ -182,6 +184,13 @@ public class DocumentServiceImpl implements DocumentService {
             return;
         }
 
+        // 索引结果统计：用于区分「全链路成功 / 部分成功 / 全链路失败」，
+        // 修复「索引失败只 warn 然后无条件上报 COMPLETED」的假成功。
+        List<String> degradations = new ArrayList<>();
+        int okPaths = 0;
+        int failedPaths = 0;
+        int chunkCount = 0;
+
         try {
             // Update status to PROCESSING
             document.setStatus(DocumentStatus.PROCESSING.getCode());
@@ -191,20 +200,10 @@ public class DocumentServiceImpl implements DocumentService {
             // 1. Read file content based on file type
             Path filePath = Paths.get(document.getFilePath());
             String fileType = document.getFileType();
-            String rawContent;
 
-            log.info("Step 1/4: Parsing document [{}], type={}, path={}", id, fileType, filePath);
+            log.info("Step 1/5: Parsing document [{}], type={}, path={}", id, fileType, filePath);
 
-            if ("markdown".equals(fileType) || "text".equals(fileType)) {
-                // Markdown 和纯文本直接读取
-                rawContent = Files.readString(filePath);
-            } else if ("pdf".equals(fileType) || "word".equals(fileType) || "unknown".equals(fileType)) {
-                // 使用 Tika 解析 PDF、Word、HTML 等格式
-                rawContent = parseWithTika(filePath);
-            } else {
-                // 尝试作为文本读取
-                rawContent = Files.readString(filePath);
-            }
+            String rawContent = resolveRawContent(filePath, fileType);
 
             if (rawContent == null || rawContent.isBlank()) {
                 throw new RuntimeException("文档内容为空或无法解析");
@@ -213,7 +212,7 @@ public class DocumentServiceImpl implements DocumentService {
             String documentIdStr = String.valueOf(id);
 
             // 2. Parse document (clean content)
-            log.info("Step 2/4: Cleaning content for document [{}], length={}", id, rawContent.length());
+            log.info("Step 2/5: Cleaning content for document [{}], length={}", id, rawContent.length());
             ParsedDocument parsed = documentParser.parse(documentIdStr, rawContent);
             String cleanedContent = parsed.getCleanedContent();
 
@@ -222,35 +221,20 @@ public class DocumentServiceImpl implements DocumentService {
             }
 
             // 3. Chunk document
-            log.info("Step 2/4: Chunking document [{}]", id);
+            log.info("Step 3/5: Chunking document [{}]", id);
             List<DocumentChunk> chunks = chunkService.chunkBySemantic(documentIdStr, cleanedContent);
-            log.info("Document [{}] chunked into {} pieces", id, chunks.size());
+            chunkCount = chunks.size();
+            log.info("Document [{}] chunked into {} pieces", id, chunkCount);
 
-            // 4. Generate embeddings (batch)
-            log.info("Step 3/4: Generating embeddings for [{}], {} chunks", id, chunks.size());
-            List<String> chunkContents = chunks.stream()
-                    .map(DocumentChunk::getContent)
-                    .collect(Collectors.toList());
-
-            // 使用批量 embedding 提高性能
-            List<List<Float>> embeddings = List.of();
-            if (milvusService.isAvailable()) {
-                try {
-                    embeddings = embeddingService.embedBatch(chunkContents);
-                    log.info("Generated {} embeddings for document [{}]", embeddings.size(), id);
-                } catch (Exception e) {
-                    log.warn("Embedding generation failed for document [{}], vector index will be skipped: {}",
-                            id, e.getMessage());
-                }
-            } else {
-                log.info("Milvus is disabled, skipping embeddings for document [{}]", id);
+            if (chunks.isEmpty()) {
+                throw new RuntimeException("分块结果为空");
             }
 
-            // 5. Index into Milvus
-            log.info("Step 4/4: Indexing document [{}] into vector store and BM25", id);
+            // 4. 分块落库（向量 ID 与分块下标一一对应，供各路索引复用）
             List<String> milvusIds = new ArrayList<>();
             List<String> documentIds = new ArrayList<>();
             List<Long> chunkIndices = new ArrayList<>();
+            List<String> chunkContents = new ArrayList<>();
 
             for (int i = 0; i < chunks.size(); i++) {
                 DocumentChunk chunk = chunks.get(i);
@@ -258,6 +242,7 @@ public class DocumentServiceImpl implements DocumentService {
                 milvusIds.add(chunkId);
                 documentIds.add(documentIdStr);
                 chunkIndices.add((long) i);
+                chunkContents.add(chunk.getContent() == null ? "" : chunk.getContent());
 
                 chunk.setVectorId(chunkId);
                 chunk.setDocumentId(id);
@@ -266,58 +251,153 @@ public class DocumentServiceImpl implements DocumentService {
 
             documentChunkMapper.delete(new LambdaQueryWrapper<DocumentChunk>()
                     .eq(DocumentChunk::getDocumentId, id));
-
-            // Persist chunks to database
             for (DocumentChunk chunk : chunks) {
                 documentChunkMapper.insert(chunk);
             }
+            log.info("Step 4/5: Persisted {} chunks for document [{}]", chunks.size(), id);
 
-            // Insert into Milvus
-            if (milvusService.isAvailable() && embeddings.size() == chunks.size()
-                    && embeddings.stream().allMatch(vector -> vector != null && !vector.isEmpty())) {
-                try {
-                    milvusService.insertVectors(milvusIds, documentIds, chunkIndices, chunkContents, embeddings);
-                } catch (Exception e) {
-                    log.warn("Milvus indexing failed for document [{}], dense retrieval will be unavailable: {}",
-                            id, e.getMessage());
-                }
+            // ── 5. 三路索引：向量 / BM25 / 图谱 ────────────────────────
+            log.info("Step 5/5: Indexing document [{}] into vector store, BM25 and knowledge graph", id);
+
+            // 5.1 稠密向量（Milvus）
+            if (!milvusService.isAvailable()) {
+                degradations.add("Milvus 未启用，未建立向量索引");
             } else {
-                log.info("Skipping Milvus indexing for document [{}]", id);
+                try {
+                    List<List<Float>> embeddings = embeddingService.embedBatch(chunkContents);
+                    if (embeddings == null || embeddings.size() != chunks.size()) {
+                        throw new IllegalStateException("embedding 数量与分块数量不一致: got "
+                                + (embeddings == null ? 0 : embeddings.size()) + ", expect " + chunks.size());
+                    }
+                    if (embeddings.stream().anyMatch(v -> v == null || v.isEmpty())) {
+                        throw new IllegalStateException("存在空 embedding，拒绝写入向量库");
+                    }
+                    milvusService.insertVectors(milvusIds, documentIds, chunkIndices, chunkContents, embeddings);
+                    okPaths++;
+                    log.info("Dense index written for document [{}]: {} vectors", id, embeddings.size());
+                } catch (Exception e) {
+                    failedPaths++;
+                    degradations.add("向量索引失败: " + e.getMessage());
+                    log.error("Dense indexing failed for document [{}]: {}", id, e.getMessage(), e);
+                }
             }
 
-            // Index into BM25 (Elasticsearch)
-            try {
-                for (int i = 0; i < chunks.size(); i++) {
+            // 5.2 稀疏关键词（Elasticsearch BM25）
+            if (!bm25Service.isAvailable()) {
+                degradations.add("Elasticsearch 不可用，未建立 BM25 索引");
+            } else {
+                boolean sparseOk = true;
+                String failureReason = null;
+                try {
                     List<String> tags = document.getTags() != null
                             ? List.of(document.getTags().split(",")) : List.of();
-                    bm25Service.indexDocument(
-                            milvusIds.get(i), documentIdStr, i,
-                            document.getTitle(), chunks.get(i).getContent(), tags);
+                    for (int i = 0; i < chunks.size(); i++) {
+                        if (!bm25Service.indexDocument(milvusIds.get(i), documentIdStr, i,
+                                document.getTitle(), chunkContents.get(i), tags)) {
+                            sparseOk = false;
+                        }
+                    }
+                } catch (Exception e) {
+                    sparseOk = false;
+                    failureReason = e.getMessage();
                 }
-            } catch (Exception e) {
-                log.warn("BM25 indexing failed for document [{}], sparse retrieval will be unavailable: {}",
-                        id, e.getMessage());
+                if (sparseOk) {
+                    okPaths++;
+                    log.info("BM25 index written for document [{}]: {} chunks", id, chunks.size());
+                } else {
+                    failedPaths++;
+                    degradations.add("BM25 索引失败" + (failureReason != null ? ": " + failureReason : "（部分分块写入失败）"));
+                    log.error("BM25 indexing failed for document [{}]", id);
+                }
             }
 
-            // Update document status
-            document.setStatus(DocumentStatus.COMPLETED.getCode());
-            document.setChunkCount(chunks.size());
-            document.setUpdatedAt(LocalDateTime.now());
-            documentMapper.updateById(document);
+            // 5.3 知识图谱（Neo4j）：实体抽取 + 建块节点 + MENTIONS 边
+            if (!graphRetrievalService.isAvailable()) {
+                degradations.add("Neo4j 未启用，未构建知识图谱");
+            } else if (!graphRetrievalService.isExtractionEnabled()) {
+                degradations.add("图谱构建已关闭（rag.graph-extraction.enabled=false）");
+            } else {
+                try {
+                    int mentions = graphRetrievalService.buildGraph(documentIdStr, chunks);
+                    okPaths++;
+                    log.info("Knowledge graph built for document [{}]: {} mention edges", id, mentions);
+                } catch (Exception e) {
+                    failedPaths++;
+                    degradations.add("知识图谱构建失败: " + e.getMessage());
+                    log.error("Graph build failed for document [{}]: {}", id, e.getMessage(), e);
+                }
+            }
 
-            log.info("Document [{}] processing completed: {} chunks indexed", id, chunks.size());
+            // 6. 依据各路径结果决定最终状态
+            DocumentStatus finalStatus;
+            if (failedPaths == 0) {
+                finalStatus = DocumentStatus.COMPLETED;
+            } else if (okPaths == 0) {
+                finalStatus = DocumentStatus.FAILED;
+            } else {
+                finalStatus = DocumentStatus.PARTIAL;
+            }
+
+            updateDocumentResult(id, finalStatus, chunkCount, String.join("; ", degradations));
+            log.info("Document [{}] processing finished: status={}, chunks={}, okPaths={}, failedPaths={}, notes={}",
+                    id, finalStatus, chunkCount, okPaths, failedPaths, degradations);
 
         } catch (Exception e) {
             log.error("Document [{}] processing failed: {}", id, e.getMessage(), e);
-            document.setStatus(DocumentStatus.FAILED.getCode());
-            document.setUpdatedAt(LocalDateTime.now());
-            documentMapper.updateById(document);
+            updateDocumentResult(id, DocumentStatus.FAILED, chunkCount, "处理失败: " + e.getMessage());
         }
     }
 
     // ----------------------------------------------------------------
     //  Internal Methods
     // ----------------------------------------------------------------
+
+    /**
+     * 按文件类型读取原始文本。
+     * <p>
+     * markdown / text 直接按 UTF-8 读；其余格式（pdf / word / html / unknown）统一走 Tika。
+     * <p>
+     * 修复点：旧实现里只有 pdf/word/unknown 会走 Tika，html 落到 else 分支被当作纯文本读，
+     * 结果整篇 HTML 标签进入分块与索引。
+     */
+    private String resolveRawContent(Path filePath, String fileType) throws IOException {
+        if ("markdown".equals(fileType) || "text".equals(fileType)) {
+            return Files.readString(filePath);
+        }
+        return parseWithTika(filePath);
+    }
+
+    /**
+     * 统一更新文档的处理结果。
+     * <p>
+     * 用显式 set() 而不是 updateById(entity)，这样空串也能写入（清掉上一次的错误说明），
+     * 不依赖 MyBatis-Plus 的字段策略。若 error_message 列尚未迁移到旧库，
+     * 自动降级为只更新状态，保证流水线本身不会因此失败。
+     */
+    private void updateDocumentResult(Long id, DocumentStatus status, int chunkCount, String note) {
+        String raw = note == null ? "" : note;
+        final String message = raw.length() > 1000 ? raw.substring(0, 1000) : raw;
+
+        try {
+            documentMapper.update(null, new LambdaUpdateWrapper<Document>()
+                    .eq(Document::getId, id)
+                    .set(Document::getStatus, status.getCode())
+                    .set(Document::getChunkCount, chunkCount)
+                    .set(Document::getErrorMessage, message)
+                    .set(Document::getUpdatedAt, LocalDateTime.now()));
+        } catch (Exception e) {
+            log.warn("更新文档 [{}] 状态（含 error_message）失败，退回仅更新状态字段: {}", id, e.getMessage());
+            try {
+                documentMapper.update(null, new LambdaUpdateWrapper<Document>()
+                        .eq(Document::getId, id)
+                        .set(Document::getStatus, status.getCode())
+                        .set(Document::getChunkCount, chunkCount)
+                        .set(Document::getUpdatedAt, LocalDateTime.now()));
+            } catch (Exception ex) {
+                log.error("更新文档 [{}] 状态失败: {}", id, ex.getMessage(), ex);
+            }
+        }
+    }
 
     private String generateFileName(String originalName) {
         String extension = "";

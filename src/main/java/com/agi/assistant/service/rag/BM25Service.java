@@ -20,6 +20,7 @@ import co.elastic.clients.elasticsearch.indices.ExistsRequest;
 import co.elastic.clients.elasticsearch.indices.DeleteIndexRequest;
 import com.agi.assistant.model.entity.SearchResult;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
@@ -47,17 +48,45 @@ public class BM25Service {
     /** Default index name */
     private static final String DEFAULT_INDEX = "rag_documents";
 
-    /** Chinese analyzers (standard fallback when IK plugin is not installed) */
-    private static final String IK_ANALYZER = "standard";
-    private static final String IK_SEARCH_ANALYZER = "standard";
-
     /** Batch size for bulk indexing */
     private static final int BULK_BATCH_SIZE = 100;
 
     private final ElasticsearchClient esClient;
 
-    public BM25Service(ElasticsearchClient esClient) {
+    /**
+     * 索引期 / 检索期分词器，来自 rag.analyzer.index / rag.analyzer.search。
+     * <p>
+     * 默认 standard（ES 内置，零依赖）。装了 analysis-ik 插件后改成
+     * ik_max_word（索引）/ ik_smart（检索）即可，无需改代码。
+     * <p>
+     * 注意：分词器定义在字段 mapping 里，已存在的索引不会因为配置变更而改变，
+     * 需要先删除索引（或重建）才会生效。
+     */
+    private final String indexAnalyzer;
+    private final String searchAnalyzer;
+
+    public BM25Service(ElasticsearchClient esClient,
+                       @Value("${rag.analyzer.index:standard}") String indexAnalyzer,
+                       @Value("${rag.analyzer.search:standard}") String searchAnalyzer) {
         this.esClient = esClient;
+        this.indexAnalyzer = (indexAnalyzer == null || indexAnalyzer.isBlank()) ? "standard" : indexAnalyzer;
+        this.searchAnalyzer = (searchAnalyzer == null || searchAnalyzer.isBlank()) ? "standard" : searchAnalyzer;
+    }
+
+    /**
+     * 探测 Elasticsearch 是否可用。
+     * <p>
+     * 之前 BM25Service 没有可用性探测，而 indexDocument 内部吞掉异常只打 warn，
+     * 导致上层无法区分「ES 没开」和「写入失败」，只能无条件上报成功。
+     */
+    public boolean isAvailable() {
+        try {
+            esClient.ping();
+            return true;
+        } catch (Exception e) {
+            log.debug("Elasticsearch ping failed: {}", e.getMessage());
+            return false;
+        }
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -85,11 +114,15 @@ public class BM25Service {
                     ExistsRequest.of(e -> e.index(indexName))).value();
 
             if (exists) {
-                log.info("Index [{}] already exists, skipping creation", indexName);
+                log.info("Index [{}] already exists, skipping creation. " +
+                         "Active analyzer config: index={}, search={}. " +
+                         "改变分词器需要先删除索引再重建（mapping 不会就地更新）。",
+                        indexName, indexAnalyzer, searchAnalyzer);
                 return;
             }
 
-            log.info("Creating Elasticsearch index [{}] with IK analyzer", indexName);
+            log.info("Creating Elasticsearch index [{}] with analyzer: index={}, search={}",
+                    indexName, indexAnalyzer, searchAnalyzer);
 
             CreateIndexRequest request = CreateIndexRequest.of(c -> c
                     .index(indexName)
@@ -101,16 +134,16 @@ public class BM25Service {
                             .properties("document_id", p -> p.keyword(k -> k))
                             .properties("chunk_index", p -> p.integer(i -> i))
                             .properties("title", p -> p.text(t -> t
-                                    .analyzer(IK_ANALYZER)
-                                    .searchAnalyzer(IK_SEARCH_ANALYZER)
+                                    .analyzer(indexAnalyzer)
+                                    .searchAnalyzer(searchAnalyzer)
                             ))
                             .properties("content", p -> p.text(t -> t
-                                    .analyzer(IK_ANALYZER)
-                                    .searchAnalyzer(IK_SEARCH_ANALYZER)
+                                    .analyzer(indexAnalyzer)
+                                    .searchAnalyzer(searchAnalyzer)
                             ))
                             .properties("tags", p -> p.text(t -> t
-                                    .analyzer(IK_ANALYZER)
-                                    .searchAnalyzer(IK_SEARCH_ANALYZER)
+                                    .analyzer(indexAnalyzer)
+                                    .searchAnalyzer(searchAnalyzer)
                             ))
                     )
             );
@@ -163,16 +196,20 @@ public class BM25Service {
 
     /**
      * Index a single document chunk to the default index.
+     *
+     * @return true 表示确实写入成功；false 表示 ES 不可用或写入失败（调用方据此判断是否需要降级上报）
      */
-    public void indexDocument(String id, String documentId, int chunkIndex,
+    public boolean indexDocument(String id, String documentId, int chunkIndex,
                               String title, String content, List<String> tags) {
-        indexDocument(DEFAULT_INDEX, id, documentId, chunkIndex, title, content, tags);
+        return indexDocument(DEFAULT_INDEX, id, documentId, chunkIndex, title, content, tags);
     }
 
     /**
      * Index a single document chunk to the specified index.
+     *
+     * @return true 写入成功；false 写入失败（异常已在内部记录，不再吞成「假装成功」）
      */
-    public void indexDocument(String indexName, String id, String documentId, int chunkIndex,
+    public boolean indexDocument(String indexName, String id, String documentId, int chunkIndex,
                               String title, String content, List<String> tags) {
         try {
             Map<String, Object> doc = new HashMap<>();
@@ -189,28 +226,35 @@ public class BM25Service {
             ));
 
             log.debug("Indexed document [{}] to [{}]", id, indexName);
+            return true;
 
         } catch (Exception e) {
-            log.warn("Skipping BM25 index for document [{}], Elasticsearch unavailable: {}", id, e.getMessage());
+            log.warn("Failed to index document [{}] into [{}]: {}", id, indexName, e.getMessage());
+            return false;
         }
     }
 
     /**
      * Batch index document chunks.
+     *
+     * @return true 全部成功；false 存在失败项或异常
      */
-    public void indexDocumentsBatch(List<Map<String, Object>> documents) {
-        indexDocumentsBatch(DEFAULT_INDEX, documents);
+    public boolean indexDocumentsBatch(List<Map<String, Object>> documents) {
+        return indexDocumentsBatch(DEFAULT_INDEX, documents);
     }
 
     /**
      * Batch index document chunks to specified index.
+     *
+     * @return true 全部成功；false 存在失败项或异常
      */
-    public void indexDocumentsBatch(String indexName, List<Map<String, Object>> documents) {
+    public boolean indexDocumentsBatch(String indexName, List<Map<String, Object>> documents) {
         if (documents == null || documents.isEmpty()) {
-            return;
+            return true;
         }
 
         try {
+            boolean allOk = true;
             for (int i = 0; i < documents.size(); i += BULK_BATCH_SIZE) {
                 int end = Math.min(i + BULK_BATCH_SIZE, documents.size());
                 List<Map<String, Object>> batch = documents.subList(i, end);
@@ -235,6 +279,7 @@ public class BM25Service {
 
                 BulkResponse response = esClient.bulk(bulkBuilder.build());
                 if (response.errors()) {
+                    allOk = false;
                     String failures = response.items().stream()
                             .filter(item -> item.error() != null)
                             .map(item -> item.id() + ": " + item.error().reason())
@@ -245,9 +290,11 @@ public class BM25Service {
                 log.debug("Bulk indexed {} documents to [{}]", batch.size(), indexName);
             }
 
+            return allOk;
+
         } catch (IOException e) {
             log.error("Failed to bulk index documents: {}", e.getMessage(), e);
-            throw new RuntimeException("Failed to bulk index documents to Elasticsearch", e);
+            return false;
         }
     }
 

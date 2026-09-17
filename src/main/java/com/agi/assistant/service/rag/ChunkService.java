@@ -153,11 +153,27 @@ public class ChunkService {
 
         String normalizedContent = normalizeText(content);
 
-        // 第一步：按段落分割
-        List<String> paragraphs = splitIntoParagraphs(normalizedContent);
+        // 第一步：按 Markdown 标题切分 section；无标题时整篇视作一个 section。
+        // 标题不会跨块被截断，且每个块会带上所属标题作为前缀（提升召回时的语义定位）。
+        List<Section> sections = splitIntoSections(normalizedContent);
 
-        // 第二步：合并小段落，拆分大段落
-        List<String> mergedChunks = mergeAndSplit(paragraphs, maxChunkSize);
+        // 第二步：section 内部按段落合并小段落、拆分大段落
+        List<String> mergedChunks = new ArrayList<>();
+        for (Section section : sections) {
+            if (section.body().isEmpty()) {
+                // 只有标题、没有正文的小节：不产出块（块内容仅标题对检索无价值）
+                continue;
+            }
+            List<String> paragraphs = splitIntoParagraphs(section.body());
+            for (String merged : mergeAndSplit(paragraphs, maxChunkSize)) {
+                mergedChunks.add(section.prependHeading(merged));
+            }
+        }
+
+        // 兜底：整篇都是标题（如目录）时，退回纯段落切分，避免产出 0 块
+        if (mergedChunks.isEmpty()) {
+            mergedChunks = mergeAndSplit(splitIntoParagraphs(normalizedContent), maxChunkSize);
+        }
 
         // 第三步：添加重叠上下文
         List<String> overlappingChunks = addOverlap(mergedChunks, overlap);
@@ -290,6 +306,51 @@ public class ChunkService {
         }
 
         return end;
+    }
+
+    /**
+     * 按 Markdown 标题（# ~ ######）把文本切成 section 列表。
+     * <p>
+     * 第一个标题之前的内容作为「前言」section（heading 为 null）。
+     * 完全没有标题时返回单个无标题 section，行为等价于旧的纯段落切分。
+     */
+    private List<Section> splitIntoSections(String text) {
+        List<Integer> starts = new ArrayList<>();
+        List<Integer> ends = new ArrayList<>();
+        List<String> headings = new ArrayList<>();
+
+        Matcher matcher = HEADING_PATTERN.matcher(text);
+        while (matcher.find()) {
+            starts.add(matcher.start());
+            ends.add(matcher.end());
+            headings.add(matcher.group().strip());
+        }
+
+        List<Section> sections = new ArrayList<>();
+        if (starts.isEmpty()) {
+            String body = text.strip();
+            if (!body.isEmpty()) {
+                sections.add(new Section(null, body));
+            }
+            return sections;
+        }
+
+        // 第一个标题之前的前言
+        if (starts.get(0) > 0) {
+            String preamble = text.substring(0, starts.get(0)).strip();
+            if (!preamble.isEmpty()) {
+                sections.add(new Section(null, preamble));
+            }
+        }
+
+        for (int i = 0; i < starts.size(); i++) {
+            int bodyStart = ends.get(i);
+            int bodyEnd = (i + 1 < starts.size()) ? starts.get(i + 1) : text.length();
+            String body = bodyEnd > bodyStart ? text.substring(bodyStart, bodyEnd).strip() : "";
+            sections.add(new Section(headings.get(i), body));
+        }
+
+        return sections;
     }
 
     /**
@@ -478,5 +539,21 @@ public class ChunkService {
                 || block == Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS
                 || block == Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION
                 || block == Character.UnicodeBlock.HALFWIDTH_AND_FULLWIDTH_FORMS;
+    }
+
+    /**
+     * 一个标题小节：heading 为所属标题行（前言为 null），body 为标题行之后的正文。
+     */
+    private record Section(String heading, String body) {
+
+        /**
+         * 给块内容补上所属标题前缀，让每个块都自带章节语义。
+         */
+        String prependHeading(String chunk) {
+            if (heading == null || heading.isBlank()) {
+                return chunk;
+            }
+            return heading + "\n" + chunk;
+        }
     }
 }

@@ -83,6 +83,7 @@ export const documentStatusMap: Record<number, { label: string; type: string }> 
   1: { label: '处理中', type: 'warning' },
   2: { label: '已完成', type: 'success' },
   3: { label: '处理失败', type: 'danger' },
+  4: { label: '部分完成', type: 'warning' },
 }
 
 /**
