@@ -62,4 +62,20 @@ public interface LlmJudge {
      * @return 生成的问题列表，绝不返回 null
      */
     List<String> reverseGenerateQuestions(String answer, int n);
+
+    /**
+     * 最近一次 LLM 调用是否成功。
+     * <p>
+     * 上层（{@code GenerationEvaluator}）据此区分「LLM 真的判断了 false」与「LLM 不可用」，
+     * 从而在不可用时把该指标记为 {@code -1.0}（绝不编造分数）。
+     * <p>
+     * 这是一个<b>新增的默认方法</b>，不破坏既有的 5 个方法签名；默认返回 {@code true}
+     * 以便测试用 stub 实现无需关心该信号。真实实现
+     * {@link WebClientLlmJudge} 会返回实际调用结果。
+     *
+     * @return true 表示最近一次调用成功拿到了可用响应
+     */
+    default boolean isLastCallSucceeded() {
+        return true;
+    }
 }
