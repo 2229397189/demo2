@@ -232,6 +232,29 @@ harness:
     queue-capacity: ${HARNESS_POOL_QUEUE:128}
     keep-alive-seconds: ${HARNESS_POOL_KEEPALIVE:60}
 
+# ──────────────────────────────────────────────────────────────
+#  评测（RAGAS / 数据集构建 / 快照导出）
+#  ragas.enabled=false 时 GenerationEvaluator 退化为旧式单 prompt 打分（不推荐）。
+#  快照只写真实数值：未评估指标输出 null 且 evaluated=false，绝不填占位数字。
+# ──────────────────────────────────────────────────────────────
+evaluation:
+  snapshot:
+    dir: ${EVALUATION_SNAPSHOT_DIR:docs/eval-snapshots}
+  ragas:
+    enabled: ${EVALUATION_RAGAS_ENABLED:true}
+    relevancy-max-tokens: ${EVALUATION_RAGAS_RELEVANCY_MAX_TOKENS:512}
+  benchmark:
+    use-llm: ${EVALUATION_BENCHMARK_USE_LLM:true}
+
+# ──────────────────────────────────────────────────────────────
+#  审计 Kafka 消费闭环
+#  audit.kafka-consumer.enabled 与 spring.kafka.enabled 双重门控：
+#  任一为 false 时消费者 Bean 不装配，AuditService 保持 DB 主写 + 本地日志。
+# ──────────────────────────────────────────────────────────────
+audit:
+  kafka-consumer:
+    enabled: ${AUDIT_KAFKA_CONSUMER_ENABLED:true}
+
 # Sandbox Docker Configuration
 sandbox:
   docker:

@@ -166,6 +166,37 @@ CREATE TABLE IF NOT EXISTS `audit_log` (
     INDEX `idx_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='审计日志表';
 
+-- ──────────────────────────────────────────────────────────────
+-- 幂等迁移：audit_log.event_id（审计消费幂等去重）
+-- 生产者（AuditService）写入前生成 event_id，消费者（AuditKafkaConsumer）
+-- 走 INSERT IGNORE，靠唯一索引保证「DB 主写 + Kafka 旁路」不产生重复行。
+-- 与上方 document.error_message 同样：先查 information_schema 再动态执行，
+-- 保证脚本可重复运行（spring.sql.init.mode=always，每次启动都会执行本文件）。
+-- 注意：字符串字面量刻意避免出现转义引号 ''，
+--       因为 Spring ScriptUtils 按简单开关追踪引号，转义引号会让它误判语句边界。
+-- ──────────────────────────────────────────────────────────────
+SET @ddl := (SELECT IF(COUNT(*) = 0,
+                       'ALTER TABLE `audit_log` ADD COLUMN `event_id` VARCHAR(64) NULL',
+                       'SELECT 1')
+             FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = 'audit_log'
+               AND COLUMN_NAME = 'event_id');
+PREPARE mig_audit_log_event_id FROM @ddl;
+EXECUTE mig_audit_log_event_id;
+DEALLOCATE PREPARE mig_audit_log_event_id;
+
+SET @ddl := (SELECT IF(COUNT(*) = 0,
+                       'CREATE UNIQUE INDEX `uk_audit_event_id` ON `audit_log`(`event_id`)',
+                       'SELECT 1')
+             FROM information_schema.STATISTICS
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = 'audit_log'
+               AND INDEX_NAME = 'uk_audit_event_id');
+PREPARE mig_audit_log_event_id_idx FROM @ddl;
+EXECUTE mig_audit_log_event_id_idx;
+DEALLOCATE PREPARE mig_audit_log_event_id_idx;
+
 -- Golden Queries 测试集
 CREATE TABLE IF NOT EXISTS `golden_query` (
     `id` BIGINT PRIMARY KEY AUTO_INCREMENT,
