@@ -48,10 +48,21 @@ export interface SourceReference {
   source?: string
 }
 
+// 检索策略：与后端 HybridRetrievalService.RetrievalStrategy + ChatServiceImpl 的
+// RACE 分支对齐（后端按 toUpperCase 解析，前端统一小写）
+export type RetrievalStrategy =
+  | 'none'
+  | 'dense'
+  | 'sparse'
+  | 'graph'
+  | 'hybrid'
+  | 'race'
+  | 'full'
+
 export interface ChatRequest {
   sessionId: string
   message: string
-  retrievalStrategy: 'none' | 'dense' | 'sparse' | 'graph' | 'hybrid'
+  retrievalStrategy: RetrievalStrategy
   useMemory: boolean
   stream: boolean
 }

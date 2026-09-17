@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { ChatSession, ChatMessage, ChatRequest, SourceReference, SandboxExecution } from '@/types'
+import type { ChatSession, ChatMessage, ChatRequest, SourceReference, SandboxExecution, RetrievalStrategy } from '@/types'
 import * as chatApi from '@/api/chat'
 
 /** Normalize backend session (number IDs, no messageCount) to frontend type */
@@ -98,7 +98,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function sendMessage(
     content: string,
-    retrievalStrategy: 'none' | 'dense' | 'sparse' | 'graph' | 'hybrid' = 'hybrid',
+    retrievalStrategy: RetrievalStrategy = 'hybrid',
     useMemory = false
   ) {
     if (!currentSession.value || isStreaming.value) return

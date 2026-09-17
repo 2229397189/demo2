@@ -73,6 +73,7 @@
         </div>
         <div class="header-right">
           <el-select v-model="retrievalStrategy" size="small" class="strategy-select">
+            <el-option label="全量检索 (FULL · 三路加权)" value="full" />
             <el-option label="混合检索" value="hybrid" />
             <el-option label="🚀 竞速检索" value="race" />
             <el-option label="稠密检索" value="dense" />
@@ -185,7 +186,7 @@ import {
   VideoPause,
 } from '@element-plus/icons-vue'
 import { useChatStore } from '@/stores/chat'
-import type { ChatSession } from '@/types'
+import type { ChatSession, RetrievalStrategy } from '@/types'
 import ChatWindow from '@/components/chat/ChatWindow.vue'
 import { formatRelativeTime } from '@/utils/format'
 
@@ -193,7 +194,7 @@ const chatStore = useChatStore()
 const router = useRouter()
 const searchText = ref('')
 const inputMessage = ref('')
-const retrievalStrategy = ref<'none' | 'dense' | 'sparse' | 'graph' | 'hybrid' | 'race'>('hybrid')
+const retrievalStrategy = ref<RetrievalStrategy>('hybrid')
 const useMemory = ref(true)
 const chatSidebarOpen = ref(false)
 
