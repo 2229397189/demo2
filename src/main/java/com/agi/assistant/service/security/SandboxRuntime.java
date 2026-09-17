@@ -43,6 +43,11 @@ public class SandboxRuntime {
     private final double cpuLimit;
     private final String dockerHost;
 
+    /** 容器安全策略（原先在 yml 里是装饰性配置、未绑定，现真正生效） */
+    private final boolean networkDisabled;
+    private final boolean readOnlyRootFs;
+    private final String tmpfsSize;
+
     private final DockerClient dockerClient;
 
     public SandboxRuntime(
@@ -52,7 +57,10 @@ public class SandboxRuntime {
             @Value("${sandbox.docker.image-java:eclipse-temurin:17-jdk}") String imageJava,
             @Value("${sandbox.docker.timeout-seconds:60}") long defaultTimeoutSeconds,
             @Value("${sandbox.docker.memory-limit:512m}") String memoryLimitStr,
-            @Value("${sandbox.docker.cpu-limit:1.0}") double cpuLimit) {
+            @Value("${sandbox.docker.cpu-limit:1.0}") double cpuLimit,
+            @Value("${sandbox.docker.network-disabled:true}") boolean networkDisabled,
+            @Value("${sandbox.docker.read-only-root-fs:true}") boolean readOnlyRootFs,
+            @Value("${sandbox.docker.tmpfs-size:256m}") String tmpfsSize) {
         this.dockerHost = resolveDockerHost(dockerHost);
         this.imagePython = imagePython;
         this.imageNode = imageNode;
@@ -60,6 +68,14 @@ public class SandboxRuntime {
         this.defaultTimeoutSeconds = defaultTimeoutSeconds;
         this.cpuLimit = cpuLimit;
         this.memoryLimit = parseMemoryLimit(memoryLimitStr);
+        this.networkDisabled = networkDisabled;
+        this.readOnlyRootFs = readOnlyRootFs;
+        this.tmpfsSize = tmpfsSize;
+
+        if (!networkDisabled || !readOnlyRootFs) {
+            log.warn("Sandbox 安全策略被放宽：networkDisabled={}, readOnlyRootFs={}。"
+                    + "生产环境建议保持两者为 true。", networkDisabled, readOnlyRootFs);
+        }
 
         DockerClientConfig config = DefaultDockerClientConfig.createDefaultConfigBuilder()
                 .withDockerHost(this.dockerHost)
@@ -152,14 +168,14 @@ public class SandboxRuntime {
 
     private String createSecureContainer(String image, String language, String encodedCode) {
         HostConfig hostConfig = HostConfig.newHostConfig()
-                .withNetworkMode("none")
-                .withReadonlyRootfs(true)
+                .withNetworkMode(networkDisabled ? "none" : "bridge")
+                .withReadonlyRootfs(readOnlyRootFs)
                 .withCapDrop(Capability.ALL)
                 .withSecurityOpts(java.util.List.of("no-new-privileges:true"))
                 .withMemory(memoryLimit)
                 .withCpuQuota((long) (cpuLimit * 100000))
                 .withTmpFs(Map.of(
-                        SANDBOX_WORK_DIR, "size=256m",
+                        SANDBOX_WORK_DIR, "size=" + tmpfsSize,
                         "/tmp", "size=128m"
                 ))
                 .withAutoRemove(false);
@@ -171,7 +187,7 @@ public class SandboxRuntime {
                 .withEnv("SANDBOX_CODE_B64=" + encodedCode)
                 .withAttachStdout(true)
                 .withAttachStderr(true)
-                .withNetworkDisabled(true)
+                .withNetworkDisabled(networkDisabled)
                 .exec();
 
         String containerId = container.getId();

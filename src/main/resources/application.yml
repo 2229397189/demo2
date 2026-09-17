@@ -18,7 +18,7 @@ spring:
   # MySQL
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/agi_assistant?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:agi_assistant}?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:123456}
     hikari:
@@ -54,7 +54,10 @@ spring:
         shutdown-timeout: 100ms
 
   # Kafka
+  # 审计日志异步通道。KafkaConfig 由该开关控制是否装配；
+  # 关闭时 AuditService 自动降级为本地日志，不影响业务。
   kafka:
+    enabled: ${KAFKA_ENABLED:true}
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
@@ -103,6 +106,19 @@ mybatis-plus:
     cache-enabled: true
     log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
 
+# ──────────────────────────────────────────────────────────────
+#  RAG 基础设施建设
+#  RagInitializer 依赖此开关创建 Milvus collection 与 ES index mapping。
+#  之前该键缺失导致初始化器从未装配 → 向量库/索引从未创建（已修复）。
+# ──────────────────────────────────────────────────────────────
+rag:
+  initializer:
+    enabled: ${RAG_INITIALIZER_ENABLED:true}
+  # ES 索引分词器：装了 analysis-ik 插件后可改成 ik_max_word / ik_smart
+  analyzer:
+    index: ${ES_INDEX_ANALYZER:standard}
+    search: ${ES_SEARCH_ANALYZER:standard}
+
 # Milvus
 milvus:
   enabled: ${MILVUS_ENABLED:false}
@@ -129,22 +145,63 @@ neo4j:
   max-connection-pool-size: 5
   connection-acquisition-timeout: 5
 
-# OpenAI Compatible API
+# ──────────────────────────────────────────────────────────────
+#  LLM（OpenAI 兼容协议）—— 智谱 GLM
+#  实测：glm-4.5-air / glm-4.6v 均可用；两者默认开启思维链（reasoning_content），
+#  简单对话下 thinking 会白烧 token（实测同题 60 → 2 completion tokens），
+#  故默认关闭，需要多步推理时可在 yml 打开。
+# ──────────────────────────────────────────────────────────────
 openai:
-  base-url: ${OPENAI_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+  base-url: ${OPENAI_BASE_URL:https://open.bigmodel.cn/api/paas/v4}
   api-key: ${OPENAI_API_KEY:}
-  model: ${OPENAI_MODEL:qwen3.7-max-2026-05-17}
+  model: ${OPENAI_MODEL:glm-4.5-air}
   max-tokens: ${OPENAI_MAX_TOKENS:4096}
   temperature: ${OPENAI_TEMPERATURE:0.7}
   timeout: ${OPENAI_TIMEOUT:120}
   connect-timeout: ${OPENAI_CONNECT_TIMEOUT:30}
+  # disabled / enabled / auto(不传该字段)
+  thinking: ${OPENAI_THINKING:disabled}
 
-# Embedding API (Alibaba DashScope)
+# ──────────────────────────────────────────────────────────────
+#  Embedding
+#  注意：智谱赠送资源包不含 embedding（调用返回 code=1113 余额不足），
+#  因此 embedding 单独走阿里云百炼 DashScope text-embedding-v3。
+#  dimensions 必须与 Milvus collection 向量维度一致，修改后需重建 collection。
+#  provider: remote（仅远程）/ local（仅本地哈希降级）/ auto（远程失败自动降级）
+# ──────────────────────────────────────────────────────────────
 embedding:
+  provider: ${EMBEDDING_PROVIDER:auto}
   base-url: ${EMBEDDING_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
   api-key: ${EMBEDDING_API_KEY:}
   model: ${EMBEDDING_MODEL:text-embedding-v3}
   dimensions: ${EMBEDDING_DIMENSIONS:1024}
+
+# ──────────────────────────────────────────────────────────────
+#  鉴权（JWT）
+# ──────────────────────────────────────────────────────────────
+app:
+  upload:
+    dir: ${UPLOAD_DIR:./uploads}
+  security:
+    # 生产环境务必通过环境变量覆盖
+    jwt-secret: ${JWT_SECRET:agi-assistant-dev-secret-please-change-in-production-0123456789}
+    jwt-expire-hours: ${JWT_EXPIRE_HOURS:168}
+    # 是否强制校验登录。false 时兼容旧的 X-User-Id 头（便于本地调试）
+    auth-enabled: ${AUTH_ENABLED:true}
+  memory:
+    # 记忆衰减定时任务：每天凌晨 3 点对长期记忆做 importance 衰减
+    decay-cron: ${MEMORY_DECAY_CRON:0 0 3 * * ?}
+    decay-enabled: ${MEMORY_DECAY_ENABLED:true}
+  chat:
+    # 是否自动把 LLM 回答里的代码块丢进沙箱执行（有资源与安全成本，默认关）
+    auto-execute-code-blocks: ${CHAT_AUTO_EXECUTE_CODE:false}
+    # 触发 ReAct 多步推理的最小消息长度
+    react-min-length: ${CHAT_REACT_MIN_LENGTH:300}
+  sandbox:
+    # 沙箱执行总开关。关闭时 /api/sandbox 直接返回未启用
+    enabled: ${SANDBOX_ENABLED:true}
+    # 是否要求显式确认后执行（true 时需请求带 confirm=true）
+    require-confirm: ${SANDBOX_REQUIRE_CONFIRM:false}
 
 # Sandbox Docker Configuration
 sandbox:
@@ -156,9 +213,9 @@ sandbox:
     timeout-seconds: ${SANDBOX_TIMEOUT:60}
     memory-limit: ${SANDBOX_MEMORY:512m}
     cpu-limit: ${SANDBOX_CPU:1.0}
-    network-disabled: true
-    read-only-root-fs: true
-    tmpfs-size: 256m
+    network-disabled: ${SANDBOX_NETWORK_DISABLED:true}
+    read-only-root-fs: ${SANDBOX_READONLY_FS:true}
+    tmpfs-size: ${SANDBOX_TMPFS:256m}
 
 # SpringDoc OpenAPI
 springdoc:

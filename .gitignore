@@ -36,6 +36,14 @@ build/
 .env
 *.log
 
+### Agent workspace (WorkBuddy) ###
+.workbuddy/
+
+### Build artifacts accidentally committed ###
+BOOT-INF/
+uploads/
+!uploads/.gitkeep
+
 ### Frontend ###
 frontend/node_modules/
 frontend/dist/

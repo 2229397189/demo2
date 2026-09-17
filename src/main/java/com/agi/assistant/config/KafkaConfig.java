@@ -78,7 +78,11 @@ public class KafkaConfig {
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         props.put(JsonDeserializer.TRUSTED_PACKAGES, "*");
-        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, "com.agi.assistant.model.AuditLog");
+        // 修正：AuditLog 实际位于 model.entity 包，原路径 com.agi.assistant.model.AuditLog
+        // 不存在，会导致消费端反序列化 ClassNotFoundException 后无限重试
+        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE,
+                "com.agi.assistant.model.entity.AuditLog");
+        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, false);
         return new DefaultKafkaConsumerFactory<>(props);
     }
 
