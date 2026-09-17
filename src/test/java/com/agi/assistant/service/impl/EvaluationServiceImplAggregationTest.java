@@ -1,6 +1,8 @@
 package com.agi.assistant.service.impl;
 
 import com.agi.assistant.model.entity.EvaluationResult;
+import com.agi.assistant.model.vo.Result;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -143,8 +145,34 @@ class EvaluationServiceImplAggregationTest {
         assertThat(avg.get("precisionAtKEvaluatedCount")).isEqualTo(2);
         assertThat(avg.get("mrr")).isEqualTo(0.5);
         assertThat(avg.get("mrrEvaluatedCount")).isEqualTo(2);
-        assertThat(avg.get("k")).isEqualTo(10.0);
-        assertThat(avg.get("kEvaluatedCount")).isEqualTo(2);
+        // k 是检索深度参数，不是指标 → 既不出现在均值，也不输出样本数
+        assertThat(avg).doesNotContainKey("k");
+        assertThat(avg).doesNotContainKey("kEvaluatedCount");
+    }
+
+    @Test
+    @DisplayName("未评估指标在 JSON 里显式输出为 null，而不是键消失")
+    void unavailableMetricSerializedAsExplicitNull() throws Exception {
+        // 复刻 Spring Boot 的全局配置：spring.jackson.default-property-inclusion = non_null
+        ObjectMapper springLike = new ObjectMapper();
+        springLike.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+        EvaluationServiceImpl svc = new EvaluationServiceImpl(null, null, null, springLike);
+
+        // 一条样本：faithfulness 有效，contextRecall 未评估（-1.0）
+        EvaluationResult r1 = generationResult(map("faithfulness", 0.8, "contextRecall", -1.0));
+        Map<String, Object> metrics = svc.computeAverageGenerationMetrics(List.of(r1));
+
+        // 复刻响应结构：Result.ok(compareResults 的 Map)
+        Map<String, Object> comparison = new LinkedHashMap<>();
+        comparison.put("generationMetricsA", metrics);
+        String json = springLike.writeValueAsString(Result.ok(comparison));
+
+        // 关键断言：未评估指标必须是显式 null，前端才能区分「未评估」与「字段不存在」
+        assertThat(json).contains("\"contextRecall\":null");
+        // 有效指标与样本数照常输出
+        assertThat(json).contains("\"faithfulness\":0.8");
+        assertThat(json).contains("\"contextRecallEvaluatedCount\":0");
+        assertThat(json).contains("\"faithfulnessEvaluatedCount\":1");
     }
 
     @Test

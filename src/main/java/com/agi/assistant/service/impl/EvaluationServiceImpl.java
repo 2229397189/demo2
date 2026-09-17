@@ -9,13 +9,18 @@ import com.agi.assistant.model.enums.EvaluationStatus;
 import com.agi.assistant.service.EvaluationService;
 import com.agi.assistant.service.evaluation.EvaluationRunner;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializerProvider;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -189,6 +194,18 @@ public class EvaluationServiceImpl implements EvaluationService {
     static final String EVALUATED_COUNT_SUFFIX = "EvaluatedCount";
 
     /**
+     * 非指标数值字段的忽略名单：这类字段虽然也是 Number，但不是「质量指标」，
+     * 不能参与平均、也不输出对应的样本数。
+     * <p>
+     * 已核对来源（{@code RetrievalEvaluator.RetrievalMetrics} 的 JSON 键）：
+     * {@code recallAtK / precisionAtK / mrr / ndcgAtK / hitRate} 是真正的指标；
+     * {@code k}（检索深度参数）是唯一的非指标数值字段，故排除之。
+     * 生成指标（{@code GenerationEvaluator.GenerationMetrics}）的明细字段均带
+     * {@code @JsonIgnore} 不落 JSON，无额外非指标数值。
+     */
+    static final Set<String> NON_METRIC_NUMERIC_KEYS = Set.of("k");
+
+    /**
      * 聚合检索指标（包级可见，便于单测）。
      *
      * @see #averageNumericMetrics(List, Function)
@@ -246,6 +263,10 @@ public class EvaluationServiceImpl implements EvaluationService {
                             continue;
                         }
                         String key = entry.getKey();
+                        // 非指标数值（如检索深度参数 k）不参与平均，也不输出样本数
+                        if (NON_METRIC_NUMERIC_KEYS.contains(key)) {
+                            continue;
+                        }
                         keyOrder.add(key);
                         double value = number.doubleValue();
                         // 负值是「不可用」哨兵，不是分数 → 跳过，绝不参与平均
@@ -261,7 +282,7 @@ public class EvaluationServiceImpl implements EvaluationService {
             }
         }
 
-        Map<String, Object> averages = new LinkedHashMap<>();
+        MetricAverages averages = new MetricAverages();
         for (String key : keyOrder) {
             int count = counts.getOrDefault(key, 0);
             // 全部样本都不可用 → null（显式「未评估」），而不是 0 或 -1
@@ -269,6 +290,44 @@ public class EvaluationServiceImpl implements EvaluationService {
             averages.put(key + EVALUATED_COUNT_SUFFIX, count);
         }
         return averages;
+    }
+
+    /**
+     * 指标均值载体。
+     * <p>
+     * 全局 Jackson 配置为 {@code default-property-inclusion: non_null}，它把
+     * <b>内容包含（content inclusion）</b>也设成了 NON_NULL，导致 Map 里的 {@code null}
+     * 值被直接丢弃 —— 前端拿到的 {@code undefined} 无法区分「该指标未评估」与
+     * 「后端根本没这个字段」。
+     * <p>
+     * 用一个<b>只作用于本类</b>的序列化器强制把 {@code null} 写成 JSON {@code null}，
+     * 全局序列化策略与其它接口都不受影响。
+     */
+    @JsonSerialize(using = MetricAveragesSerializer.class)
+    static final class MetricAverages extends LinkedHashMap<String, Object> {
+        private static final long serialVersionUID = 1L;
+    }
+
+    /**
+     * {@link MetricAverages} 的序列化器：与普通 Map 不同，它<b>显式输出 null 值</b>，
+     * 这样「未评估」指标在响应 JSON 里是 {@code "contextRecall":null} 而非键消失。
+     */
+    static final class MetricAveragesSerializer extends JsonSerializer<MetricAverages> {
+        @Override
+        public void serialize(MetricAverages value, JsonGenerator gen, SerializerProvider serializers)
+                throws IOException {
+            gen.writeStartObject();
+            for (Map.Entry<String, Object> entry : value.entrySet()) {
+                gen.writeFieldName(entry.getKey());
+                Object entryValue = entry.getValue();
+                if (entryValue == null) {
+                    gen.writeNull();
+                } else {
+                    serializers.defaultSerializeValue(entryValue, gen);
+                }
+            }
+            gen.writeEndObject();
+        }
     }
 
     /**
