@@ -75,46 +75,22 @@ public class RaceStrategy {
 
         List<CompletableFuture<List<SearchResult>>> futures = new ArrayList<>();
         for (SearchSource source : sources) {
-            CompletableFuture<List<SearchResult>> future = CompletableFuture.supplyAsync(
-                    () -> executeSearchSource(source, query), raceExecutor);
-            futures.add(future);
+            futures.add(CompletableFuture.supplyAsync(
+                    () -> executeSearchSource(source, query), raceExecutor));
         }
 
-        // Race: return first non-empty result
-        try {
-            CompletableFuture<Object> race = CompletableFuture.anyOf(
-                    futures.toArray(new CompletableFuture[0]));
+        List<SearchResult> winner = raceFirstUsable(
+                futures,
+                list -> list != null && !list.isEmpty(),
+                DEFAULT_TIMEOUT_SECONDS,
+                Collections.emptyList());
 
-            Object result = race.get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            if (result instanceof List<?> resultList && !resultList.isEmpty()) {
-                log.info("Race search won by source, returned {} results", resultList.size());
-                return (List<SearchResult>) resultList;
-            }
-        } catch (Exception e) {
-            log.warn("Race search anyOf failed: {}", e.getMessage());
-        }
-
-        // Fallback: collect all completed results
-        List<SearchResult> fallback = new ArrayList<>();
-        for (CompletableFuture<List<SearchResult>> future : futures) {
-            try {
-                if (future.isDone() && !future.isCompletedExceptionally()) {
-                    List<SearchResult> partial = future.getNow(Collections.emptyList());
-                    if (partial != null && !partial.isEmpty()) {
-                        fallback.addAll(partial);
-                        break;
-                    }
-                }
-            } catch (Exception ignored) {
-                // skip failed futures
-            }
-        }
-
-        if (fallback.isEmpty()) {
+        if (winner.isEmpty()) {
             log.warn("All search sources failed for query: '{}'", query);
+        } else {
+            log.info("Race search won, returned {} results", winner.size());
         }
-
-        return fallback;
+        return winner;
     }
 
     /**
@@ -137,40 +113,17 @@ public class RaceStrategy {
 
         List<CompletableFuture<String>> futures = new ArrayList<>();
         for (ModelConfig model : models) {
-            CompletableFuture<String> future = CompletableFuture.supplyAsync(
-                    () -> callModel(model, prompt), raceExecutor);
-            futures.add(future);
+            futures.add(CompletableFuture.supplyAsync(() -> callModel(model, prompt), raceExecutor));
         }
 
-        try {
-            CompletableFuture<Object> race = CompletableFuture.anyOf(
-                    futures.toArray(new CompletableFuture[0]));
-
-            Object result = race.get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            if (result instanceof String response && !response.isBlank()) {
-                log.info("Race model won: response length={}", response.length());
-                return response;
-            }
-        } catch (Exception e) {
-            log.warn("Race model anyOf failed: {}", e.getMessage());
+        String winner = raceFirstUsable(futures, s -> s != null && !s.isBlank(),
+                DEFAULT_TIMEOUT_SECONDS, "");
+        if (winner.isBlank()) {
+            log.warn("All models failed for prompt");
+        } else {
+            log.info("Race model won: response length={}", winner.length());
         }
-
-        // Fallback: collect first completed
-        for (CompletableFuture<String> future : futures) {
-            try {
-                if (future.isDone() && !future.isCompletedExceptionally()) {
-                    String partial = future.getNow("");
-                    if (partial != null && !partial.isBlank()) {
-                        return partial;
-                    }
-                }
-            } catch (Exception ignored) {
-                // skip
-            }
-        }
-
-        log.warn("All models failed for prompt");
-        return "";
+        return winner;
     }
 
     /**
@@ -193,7 +146,7 @@ public class RaceStrategy {
 
         List<CompletableFuture<List<SearchResult>>> futures = new ArrayList<>();
         for (RetrievalStrategy strategy : strategies) {
-            CompletableFuture<List<SearchResult>> future = CompletableFuture.supplyAsync(
+            futures.add(CompletableFuture.supplyAsync(
                     () -> {
                         try {
                             List<SearchResult> results = hybridRetrievalService.retrieve(
@@ -206,44 +159,91 @@ public class RaceStrategy {
                             log.debug("Strategy {} failed: {}", strategy, e.getMessage());
                         }
                         return Collections.<SearchResult>emptyList();
-                    }, raceExecutor);
-            futures.add(future);
+                    }, raceExecutor));
         }
 
-        try {
-            CompletableFuture<Object> race = CompletableFuture.anyOf(
-                    futures.toArray(new CompletableFuture[0]));
+        List<SearchResult> winner = raceFirstUsable(
+                futures,
+                list -> list != null && !list.isEmpty(),
+                DEFAULT_TIMEOUT_SECONDS,
+                Collections.emptyList());
 
-            Object result = race.get(DEFAULT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            if (result instanceof List<?> resultList && !resultList.isEmpty()) {
-                log.info("Race retrieve won, returned {} results", resultList.size());
-                return (List<SearchResult>) resultList;
-            }
-        } catch (Exception e) {
-            log.warn("Race retrieve anyOf failed: {}", e.getMessage());
+        if (winner.isEmpty()) {
+            log.warn("All retrieval strategies failed for query");
         }
-
-        // Fallback
-        for (CompletableFuture<List<SearchResult>> future : futures) {
-            try {
-                if (future.isDone() && !future.isCompletedExceptionally()) {
-                    List<SearchResult> partial = future.getNow(Collections.emptyList());
-                    if (partial != null && !partial.isEmpty()) {
-                        return partial;
-                    }
-                }
-            } catch (Exception ignored) {
-                // skip
-            }
-        }
-
-        log.warn("All retrieval strategies failed for query");
-        return Collections.emptyList();
+        return winner;
     }
 
     // ----------------------------------------------------------------
     //  Internal
     // ----------------------------------------------------------------
+
+    /**
+     * 竞速的公共实现：<b>第一个产出「可用」结果的参与者获胜</b>。
+     * <p>
+     * 修复说明：此前用的是 {@code CompletableFuture.anyOf(...)}，它的语义是
+     * 「第一个<b>完成</b>的获胜」而不是「第一个<b>有结果</b>的获胜」。
+     * 差别在降级场景里是致命的：某个源很快返回了空结果（比如图检索不可用、
+     * 直接返回 emptyList），anyOf 会立刻把它判为赢家，然后代码发现结果为空，
+     * 只能去「已完成 futures」里再捞一遍 —— 而真正有结果的慢源此时还没跑完，
+     * 于是整轮竞速被判死、返回空，明明有一路能拿到数据。
+     * 现在每个 future 完成时才判断是否可用，可用才认作赢家。
+     *
+     * @param futures        各参与者的 future
+     * @param usable         判定结果是否「可用」（非空 / 非空白）
+     * @param timeoutSeconds 整体等待上限
+     * @param fallbackValue  全员失败时的返回值
+     * @param <T>            结果类型
+     * @return 第一个可用结果，或 fallbackValue
+     */
+    private <T> T raceFirstUsable(List<CompletableFuture<T>> futures,
+                                  java.util.function.Predicate<T> usable,
+                                  long timeoutSeconds,
+                                  T fallbackValue) {
+        if (futures == null || futures.isEmpty()) {
+            return fallbackValue;
+        }
+
+        CompletableFuture<T> winner = new CompletableFuture<>();
+        for (CompletableFuture<T> future : futures) {
+            future.whenComplete((value, error) -> {
+                if (error != null) {
+                    return;
+                }
+                try {
+                    if (usable.test(value)) {
+                        winner.complete(value);
+                    }
+                } catch (Exception ignored) {
+                    // 判定本身出错就当这个参与者没结果
+                }
+            });
+        }
+
+        try {
+            return winner.get(timeoutSeconds, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Race interrupted while waiting for a usable result");
+        } catch (Exception e) {
+            log.warn("Race timed out / no usable result within {}s: {}", timeoutSeconds, e.getMessage());
+        }
+
+        // 兜底：整体超时后，从「已完成」的结果里挑一个可用的（谁先完成谁优先）
+        for (CompletableFuture<T> future : futures) {
+            try {
+                if (future.isDone() && !future.isCompletedExceptionally()) {
+                    T value = future.getNow(fallbackValue);
+                    if (usable.test(value)) {
+                        return value;
+                    }
+                }
+            } catch (Exception ignored) {
+                // skip failed futures
+            }
+        }
+        return fallbackValue;
+    }
 
     private List<SearchResult> executeSearchSource(SearchSource source, String query) {
         try {

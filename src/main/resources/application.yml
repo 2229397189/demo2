@@ -209,6 +209,25 @@ app:
     # 是否要求显式确认后执行（true 时需请求带 confirm=true）
     require-confirm: ${SANDBOX_REQUIRE_CONFIRM:false}
 
+# ──────────────────────────────────────────────────────────────
+#  Harness 运行时（超时/重试/降级/状态机）
+#  线程池必须有界：无界池在过载时会把线程数堆到 OOM，而不是可观测地拒绝
+# ──────────────────────────────────────────────────────────────
+harness:
+  retry:
+    max-retries: ${HARNESS_MAX_RETRIES:3}
+    retry-delay: ${HARNESS_RETRY_DELAY:1000}
+    backoff-multiplier: ${HARNESS_BACKOFF:2.0}
+  timeout:
+    llm-timeout: ${HARNESS_LLM_TIMEOUT:30000}
+    tool-timeout: ${HARNESS_TOOL_TIMEOUT:10000}
+    rag-timeout: ${HARNESS_RAG_TIMEOUT:10000}
+  pool:
+    core-size: ${HARNESS_POOL_CORE:8}
+    max-size: ${HARNESS_POOL_MAX:32}
+    queue-capacity: ${HARNESS_POOL_QUEUE:128}
+    keep-alive-seconds: ${HARNESS_POOL_KEEPALIVE:60}
+
 # Sandbox Docker Configuration
 sandbox:
   docker:

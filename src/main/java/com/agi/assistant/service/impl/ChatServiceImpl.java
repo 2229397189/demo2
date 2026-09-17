@@ -17,7 +17,9 @@ import com.agi.assistant.service.memory.MemoryConsolidation;
 import com.agi.assistant.service.memory.ShortTermMemory;
 import com.agi.assistant.service.rag.HybridRetrievalService;
 import com.agi.assistant.service.rag.WebSearchService;
+import com.agi.assistant.service.security.AuditService;
 import com.agi.assistant.service.security.InputValidator;
+import com.agi.assistant.model.enums.ToolRiskLevel;
 import com.agi.assistant.service.agent.ReactEngine;
 import com.agi.assistant.service.agent.RaceStrategy;
 import com.agi.assistant.service.harness.HarnessRuntime;
@@ -81,6 +83,7 @@ public class ChatServiceImpl implements ChatService {
     private final ReactEngine reactEngine;
     private final RaceStrategy raceStrategy;
     private final HarnessRuntime harnessRuntime;
+    private final AuditService auditService;
 
     @Value("classpath:prompts/system-prompt.md")
     private Resource systemPromptResource;
@@ -88,8 +91,24 @@ public class ChatServiceImpl implements ChatService {
     /** 缓存模板内容，避免每次请求都读文件 */
     private volatile String cachedSystemPromptTemplate;
 
-    /** 复杂问题判定阈值：消息长度超过此值时考虑使用 ReAct 模式 */
-    private static final int COMPLEX_QUERY_THRESHOLD = 100;
+    /**
+     * 复杂问题判定阈值：消息长度超过此值时考虑使用 ReAct 模式。
+     * <p>
+     * 修复说明：此前是写死的常量 {@code COMPLEX_QUERY_THRESHOLD = 100}，
+     * 而 application.yml 里的 {@code app.chat.react-min-length} 从来没有代码读过 ——
+     * 改配置不生效，属于典型的「配置项是装饰品」。
+     */
+    @Value("${app.chat.react-min-length:300}")
+    private int reactMinLength;
+
+    /**
+     * 是否自动把 LLM 回答里的代码块丢进沙箱执行。
+     * <p>
+     * 修复说明：{@code app.chat.auto-execute-code-blocks} 同样从未被消费，
+     * 而代码执行是有资源成本和安全面的动作，必须由开关控制（默认关）。
+     */
+    @Value("${app.chat.auto-execute-code-blocks:false}")
+    private boolean autoExecuteCodeBlocksR;
 
     /** 复杂问题关键词 */
     private static final List<String> COMPLEX_KEYWORDS = List.of(
@@ -112,7 +131,8 @@ public class ChatServiceImpl implements ChatService {
                            InputValidator inputValidator,
                            ReactEngine reactEngine,
                            RaceStrategy raceStrategy,
-                           HarnessRuntime harnessRuntime) {
+                           HarnessRuntime harnessRuntime,
+                           @Lazy AuditService auditService) {
         this.chatSessionMapper = chatSessionMapper;
         this.chatMessageMapper = chatMessageMapper;
         this.hybridRetrievalService = hybridRetrievalService;
@@ -128,6 +148,7 @@ public class ChatServiceImpl implements ChatService {
         this.reactEngine = reactEngine;
         this.raceStrategy = raceStrategy;
         this.harnessRuntime = harnessRuntime;
+        this.auditService = auditService;
     }
 
     @Override
@@ -136,17 +157,26 @@ public class ChatServiceImpl implements ChatService {
                 userId, request.getSessionId(),
                 request.getMessage() != null ? request.getMessage().length() : 0);
 
-        // 输入安全验证
-        if (request.getMessage() != null && !inputValidator.isValid(request.getMessage())) {
-            log.warn("Input validation failed for userId={}", userId);
-            try {
-                emitter.send(SseEmitter.event()
-                        .name("error")
-                        .data("输入内容包含不安全的字符或模式，请检查后重试。"));
-            } catch (IOException ignored) {
+        // 输入安全验证：只有高置信度攻击载荷才拦截；
+        // 敏感词 / 「像 SQL」「像 XSS」这类弱信号放行但记审计，
+        // 否则用户问「select 和 from 的执行顺序」都会被自己的助手拒答。
+        if (request.getMessage() != null) {
+            InputValidator.ValidationResult validation = inputValidator.validate(request.getMessage());
+            if (validation.getSeverity() != InputValidator.Severity.CLEAN) {
+                boolean blocked = validation.getSeverity() == InputValidator.Severity.BLOCK;
+                auditInput(userId, validation, blocked);
+                if (blocked) {
+                    log.warn("Input validation BLOCKED for userId={}: {}", userId, validation.getBlockers());
+                    try {
+                        emitter.send(SseEmitter.event()
+                                .name("error")
+                                .data("输入内容包含高风险的注入载荷，已被安全策略拦截。"));
+                    } catch (IOException ignored) {
+                    }
+                    emitter.complete();
+                    return;
+                }
             }
-            emitter.complete();
-            return;
         }
 
         try {
@@ -245,9 +275,13 @@ public class ChatServiceImpl implements ChatService {
             if (isComplexQuery(request.getMessage())) {
                 sendThinkingEvent(emitter, "react", "检测到复杂问题，启动 ReAct 多步推理...");
                 try {
+                    final Long reactUserId = userId;
                     String reactAnswer = harnessRuntime.execute(() ->
-                                    reactEngine.run(request.getMessage(), 5),
-                            "react-engine", 60000);
+                                    reactEngine.run(request.getMessage(), 5, reactUserId),
+                            "react-engine", 60000,
+                            // 真正的降级：ReAct 失败时返回空串，走下面的普通流式回答，
+                            // 而不是像以前那样只演戏式地返回 null
+                            () -> "");
 
                     if (reactAnswer != null && !reactAnswer.isBlank()
                             && !reactAnswer.startsWith("经过多轮推理")) {
@@ -527,9 +561,43 @@ public class ChatServiceImpl implements ChatService {
     }
 
     /**
+     * 把输入安全事件写入审计。
+     * <p>
+     * 修复说明：此前输入校验只打了一行日志 —— 谁在什么时候试图注入什么，没有留下
+     * 任何可查询的记录。安全事件的价值恰恰在于「事后能查」，所以这里落到 audit_log：
+     * 阻断级记为 blocked=1 + BLOCK 风险等级，警告级记为 blocked=0 + WARN。
+     */
+    private void auditInput(Long userId, InputValidator.ValidationResult validation, boolean blocked) {
+        if (auditService == null) {
+            return;
+        }
+        try {
+            List<String> reasons = blocked ? validation.getBlockers() : validation.getWarnings();
+            auditService.log(
+                    userId,
+                    blocked ? "INPUT_BLOCKED" : "INPUT_FLAGGED",
+                    "chat:message",
+                    blocked ? ToolRiskLevel.BLOCK : ToolRiskLevel.WARN,
+                    blocked,
+                    reasons == null ? null : String.join(" | ", reasons));
+        } catch (Exception e) {
+            log.debug("Failed to write input audit log: {}", e.getMessage());
+        }
+    }
+
+    /**
      * Detect code blocks in the assistant's response and execute them in sandbox.
+     * <p>
+     * 受 {@code app.chat.auto-execute-code-blocks} 控制（默认关）。
+     * 代码执行是有资源成本 + 安全面的动作，不应在用户没要求时自动发生 ——
+     * 这也是为什么它必须是一个能被关掉的开关，而不是写死在代码路径里。
      */
     private void executeCodeBlocks(String content, SseEmitter emitter) {
+        if (!autoExecuteCodeBlocksR) {
+            log.debug("Code block auto-execution disabled (app.chat.auto-execute-code-blocks=false), skipping");
+            return;
+        }
+
         Matcher matcher = CODE_BLOCK_PATTERN.matcher(content);
         while (matcher.find()) {
             String lang = matcher.group(1).toLowerCase();
@@ -746,8 +814,8 @@ public class ChatServiceImpl implements ChatService {
     private boolean isComplexQuery(String message) {
         if (message == null) return false;
 
-        // 条件 1：消息较长
-        if (message.length() > COMPLEX_QUERY_THRESHOLD) {
+        // 条件 1：消息较长（阈值来自 app.chat.react-min-length）
+        if (message.length() > reactMinLength) {
             return true;
         }
 

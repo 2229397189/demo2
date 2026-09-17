@@ -1,5 +1,6 @@
 package com.agi.assistant.service.security;
 
+import com.agi.assistant.mapper.AuditLogMapper;
 import com.agi.assistant.model.entity.AuditLog;
 import com.agi.assistant.model.enums.ToolRiskLevel;
 import lombok.extern.slf4j.Slf4j;
@@ -13,21 +14,42 @@ import java.time.LocalDateTime;
 /**
  * 审计服务
  * <p>
- * 通过 Kafka 异步发送审计日志，保证高吞吐量和可靠性。
- * Kafka 不可用时降级为日志记录。
+ * 审计日志有两条落地路径：
+ * <ol>
+ *   <li><b>数据库</b>（主路径）：直接写 {@code audit_log} 表。审计的本质要求是「可追溯」，
+ *       而 Kafka 是可选组件（{@code spring.kafka.enabled} 默认 false），
+ *       把审计完全建立在可选组件上，等于默认没有审计。</li>
+ *   <li><b>Kafka</b>（旁路）：开启后额外投递一份，供下游实时消费 / 告警。</li>
+ * </ol>
+ * <p>
+ * 修复说明：此前本类只发 Kafka，Kafka 不可用时仅打一条 log 就结束 ——
+ * {@code AuditLogMapper} 与 {@code audit_log} 表从头到尾没人用过，
+ * 属于「看起来有审计、实际全丢了」。现在写库为主、Kafka 为辅，两者
+ * 任一失败都不阻断业务，但会在日志里明确记下来。
+ * <p>
+ * 安全红线：审计写入绝不能因为自身失败而影响业务，所以所有异常都在本类内部消化。
  */
 @Slf4j
 @Lazy
 @Service
 public class AuditService {
 
+    public static final String KAFKA_TOPIC_AUDIT_LOG = "agi-audit-log";
+
+    /** 单条 details 落库长度上限，防止超长内容把行撑爆（列宽 1024/2048 级别） */
+    private static final int MAX_DETAILS_LENGTH = 2000;
+
+    private final AuditLogMapper auditLogMapper;
+
     @Autowired(required = false)
     private KafkaTemplate<String, Object> kafkaTemplate;
 
+    public AuditService(@Autowired(required = false) AuditLogMapper auditLogMapper) {
+        this.auditLogMapper = auditLogMapper;
+    }
+
     /**
      * 记录审计日志。
-     * <p>
-     * 异步发送到 Kafka topic，失败时记录错误日志但不阻断业务。
      *
      * @param userId    用户 ID
      * @param action    操作类型
@@ -45,9 +67,10 @@ public class AuditService {
         auditLog.setResource(resource);
         auditLog.setRiskLevel(riskLevel != null ? riskLevel.name() : ToolRiskLevel.SAFE.name());
         auditLog.setBlocked(blocked ? 1 : 0);
-        auditLog.setDetails(details);
+        auditLog.setDetails(truncateDetails(details));
         auditLog.setCreatedAt(LocalDateTime.now());
 
+        persist(auditLog);
         sendToKafka(auditLog);
     }
 
@@ -77,13 +100,32 @@ public class AuditService {
     }
 
     /**
-     * 将审计日志发送到 Kafka，Kafka 不可用时降级为日志记录。
+     * 写入数据库。失败时降级为日志，不抛异常。
+     */
+    private void persist(AuditLog auditLog) {
+        if (auditLogMapper == null) {
+            log.warn("[AUDIT] 审计表不可用（AuditLogMapper 未注入），本条审计仅记录在日志中: "
+                    + "userId={}, action={}, resource={}", auditLog.getUserId(),
+                    auditLog.getAction(), auditLog.getResource());
+            return;
+        }
+
+        try {
+            auditLogMapper.insert(auditLog);
+        } catch (Exception e) {
+            log.error("[AUDIT] 审计日志写库失败（不影响业务）: userId={}, action={}, err={}",
+                    auditLog.getUserId(), auditLog.getAction(), e.getMessage());
+        }
+    }
+
+    /**
+     * 将审计日志发送到 Kafka（旁路）。Kafka 未启用/不可用时仅记录日志。
      */
     private void sendToKafka(AuditLog auditLog) {
         if (kafkaTemplate == null) {
-            log.info("[AUDIT LOG] (Kafka unavailable) userId={}, action={}, resource={}, risk={}, blocked={}, time={}",
+            log.debug("[AUDIT LOG] (Kafka disabled) userId={}, action={}, resource={}, risk={}, blocked={}",
                     auditLog.getUserId(), auditLog.getAction(), auditLog.getResource(),
-                    auditLog.getRiskLevel(), auditLog.getBlocked(), auditLog.getCreatedAt());
+                    auditLog.getRiskLevel(), auditLog.getBlocked());
             return;
         }
 
@@ -92,7 +134,7 @@ public class AuditService {
                     ? String.valueOf(auditLog.getUserId())
                     : "anonymous";
 
-            kafkaTemplate.send("agi-audit-log", key, auditLog)
+            kafkaTemplate.send(KAFKA_TOPIC_AUDIT_LOG, key, auditLog)
                     .whenComplete((result, ex) -> {
                         if (ex != null) {
                             log.error("Failed to send audit log to Kafka: {}", ex.getMessage());
@@ -101,5 +143,14 @@ public class AuditService {
         } catch (Exception e) {
             log.error("Error sending audit log to Kafka: {}", e.getMessage());
         }
+    }
+
+    private String truncateDetails(String details) {
+        if (details == null) {
+            return null;
+        }
+        return details.length() <= MAX_DETAILS_LENGTH
+                ? details
+                : details.substring(0, MAX_DETAILS_LENGTH) + "... [truncated]";
     }
 }

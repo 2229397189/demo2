@@ -55,6 +55,11 @@ public class ToolRiskClassifier {
 
     /**
      * 对工具调用进行风险分类。
+     * <p>
+     * <b>使用建议</b>：对已注册工具（{@code ToolRegistry} 内的工具）不要用本方法 ——
+     * 已注册工具应当由自己声明的 {@code riskLevel} 说了算，本方法的
+     * 「未知名称一律 WARN」会把所有自研工具都误判成 WARN，导致每次调用都刷警告日志。
+     * 已注册工具请用 {@link #isBlockedName(String)} + {@link #classifyParamsOnly(String)}。
      *
      * @param toolName 工具名称
      * @param params   工具参数（JSON 字符串或纯文本）
@@ -99,6 +104,41 @@ public class ToolRiskClassifier {
             return ToolRiskLevel.BLOCK;
         }
         return ToolRiskLevel.WARN;
+    }
+
+    /**
+     * 名称是否命中硬红线黑名单（delete/drop/exec/sudo 等）。
+     * <p>
+     * 这是不依赖注册状态的硬约束：即使某个高危工具被误注册进注册表，也不放行。
+     *
+     * @param toolName 工具名称
+     * @return true 表示必须阻断
+     */
+    public boolean isBlockedName(String toolName) {
+        if (toolName == null || toolName.isBlank()) {
+            return false;
+        }
+        return BLOCK_TOOLS.contains(toolName.trim().toLowerCase());
+    }
+
+    /**
+     * 只根据「参数内容」判定风险，不看工具名。
+     * <p>
+     * 用于已注册工具：基础风险由工具自己声明，本方法只负责在参数里
+     * 发现注入/危险命令时把风险等级往上抬。
+     *
+     * @param params 工具参数
+     * @return 参数侧的风险等级（无危险参数时返回 SAFE）
+     */
+    public ToolRiskLevel classifyParamsOnly(String params) {
+        if (params == null || params.isBlank()) {
+            return ToolRiskLevel.SAFE;
+        }
+        if (hasDangerousParams(params)) {
+            log.warn("Tool params contain dangerous pattern, raising risk to WARN");
+            return ToolRiskLevel.WARN;
+        }
+        return ToolRiskLevel.SAFE;
     }
 
     /**

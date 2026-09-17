@@ -2,6 +2,7 @@ package com.agi.assistant.service.agent;
 
 import com.agi.assistant.model.enums.ToolRiskLevel;
 import com.agi.assistant.model.enums.ToolStatus;
+import com.agi.assistant.service.security.AuditService;
 import com.agi.assistant.service.security.ToolRiskClassifier;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -31,9 +32,12 @@ public class ToolRegistry {
 
     private final Map<String, ToolDefinition> tools = new ConcurrentHashMap<>();
     private final ToolRiskClassifier toolRiskClassifier;
+    private final AuditService auditService;
 
-    public ToolRegistry(ToolRiskClassifier toolRiskClassifier) {
+    public ToolRegistry(ToolRiskClassifier toolRiskClassifier,
+                        @org.springframework.context.annotation.Lazy AuditService auditService) {
         this.toolRiskClassifier = toolRiskClassifier;
+        this.auditService = auditService;
     }
 
     // ----------------------------------------------------------------
@@ -126,6 +130,17 @@ public class ToolRegistry {
      * @throws SecurityException        if the tool is blocked by risk level
      */
     public Map<String, Object> executeTool(String name, Map<String, Object> params) {
+        return executeTool(name, params, null);
+    }
+
+    /**
+     * 带调用者身份的版本：命中审计时会记录发起人。
+     *
+     * @param name   工具名
+     * @param params 参数
+     * @param userId 调用者 ID，可为 null
+     */
+    public Map<String, Object> executeTool(String name, Map<String, Object> params, Long userId) {
         ToolDefinition tool = getTool(name);
         if (tool == null) {
             log.warn("Tool not found: {}", name);
@@ -136,14 +151,23 @@ public class ToolRegistry {
             return errorResult;
         }
 
-        // 使用 ToolRiskClassifier 进行动态风险分类
+        // 风险判定：
+        //   基础风险 = 工具注册时自己声明的 riskLevel（自研工具自己最清楚风险）
+        //   参数风险 = 分类器只看参数，发现注入/危险命令时把等级往上抬
+        //   名称黑名单 = 硬红线，命中即阻断（即使被误注册）
+        // 修复说明：此前用 toolRiskClassifier.classify(name, paramsStr) 把「名称风险」
+        // 也算进来，而分类器对未知名称一律返回 WARN —— 所有自研工具都会被抬到 WARN，
+        // 每次调用都刷一条 "Executing tool with WARN risk level"，噪音淹没真信号。
         String paramsStr = params != null ? params.toString() : null;
-        ToolRiskLevel classifiedRisk = toolRiskClassifier.classify(name, paramsStr);
-        ToolRiskLevel effectiveRisk = classifiedRisk.ordinal() > tool.getRiskLevel().ordinal()
-                ? classifiedRisk : tool.getRiskLevel();
+        ToolRiskLevel paramRisk = toolRiskClassifier.classifyParamsOnly(paramsStr);
+        ToolRiskLevel effectiveRisk = paramRisk.ordinal() > tool.getRiskLevel().ordinal()
+                ? paramRisk : tool.getRiskLevel();
+        if (toolRiskClassifier.isBlockedName(name)) {
+            effectiveRisk = ToolRiskLevel.BLOCK;
+        }
 
-        log.debug("Tool [{}] risk check: registered={}, classified={}, effective={}",
-                name, tool.getRiskLevel(), classifiedRisk, effectiveRisk);
+        log.debug("Tool [{}] risk check: registered={}, paramRisk={}, effective={}",
+                name, tool.getRiskLevel(), paramRisk, effectiveRisk);
 
         // Risk level check
         switch (effectiveRisk) {
@@ -153,6 +177,8 @@ public class ToolRegistry {
                 blockedResult.put("status", ToolStatus.FAILURE.name());
                 blockedResult.put("error", "Tool is blocked: " + name);
                 blockedResult.put("toolName", name);
+                // 被阻断的调用是安全事件，必须留痕
+                audit(userId, name, effectiveRisk, true, "blocked by risk classifier: " + paramsStr);
                 return blockedResult;
 
             case WARN:
@@ -179,19 +205,43 @@ public class ToolRegistry {
             result.put("toolName", name);
             result.put("elapsedMs", elapsed);
 
+            tool.setStatus(ToolStatus.SUCCESS);
+            tool.setLastExecutedAt(LocalDateTime.now());
+
             log.info("Tool [{}] executed successfully in {}ms", name, elapsed);
+            audit(userId, name, effectiveRisk, false, "ok in " + elapsed + "ms");
             return result;
 
         } catch (Exception e) {
             long elapsed = System.currentTimeMillis() - startTime;
             log.error("Tool [{}] execution failed after {}ms: {}", name, elapsed, e.getMessage(), e);
 
+            tool.setStatus(ToolStatus.FAILURE);
+            tool.setLastExecutedAt(LocalDateTime.now());
+
             Map<String, Object> failureResult = new ConcurrentHashMap<>();
             failureResult.put("status", ToolStatus.FAILURE.name());
             failureResult.put("error", e.getMessage());
             failureResult.put("toolName", name);
             failureResult.put("elapsedMs", elapsed);
+            audit(userId, name, effectiveRisk, false, "failed: " + e.getMessage());
             return failureResult;
+        }
+    }
+
+    /**
+     * 记录工具调用审计。审计失败绝不能影响工具调用本身。
+     */
+    private void audit(Long userId, String toolName, ToolRiskLevel riskLevel,
+                       boolean blocked, String details) {
+        if (auditService == null) {
+            return;
+        }
+        try {
+            auditService.log(userId, blocked ? "TOOL_BLOCKED" : "TOOL_EXECUTE",
+                    "tool:" + toolName, riskLevel, blocked, details);
+        } catch (Exception e) {
+            log.debug("Failed to write tool audit log: {}", e.getMessage());
         }
     }
 

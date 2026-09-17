@@ -33,24 +33,21 @@ import java.util.stream.Collectors;
 @Service
 public class ReactEngine {
 
-    private static final String REACT_SYSTEM_PROMPT =
+    private static final String REACT_INSTRUCTION =
             "你是一个智能助手，采用 ReAct (Reasoning + Acting) 模式工作。\n" +
             "对于每个问题，你需要：\n" +
             "1. Thought: 分析当前情况，决定下一步行动\n" +
-            "2. Action: 执行一个具体的操作（搜索、计算、查询工具等）\n" +
+            "2. Action: 执行一个具体的操作（调用下面列出的某个工具）\n" +
             "3. Observation: 观察操作结果\n" +
             "重复以上步骤直到得到最终答案。\n\n" +
-            "可用的操作格式：\n" +
-            "- search(query): 搜索知识库\n" +
-            "- calculate(expression): 计算数学表达式\n" +
-            "- lookup(term): 查询术语定义\n" +
-            "- finish(answer): 给出最终答案\n\n" +
             "请严格按以下格式输出：\n" +
             "Thought: [你的思考过程]\n" +
-            "Action: [操作名称(参数)]\n" +
+            "Action: [工具名(参数)]\n" +
             "或\n" +
             "Thought: [你的思考过程]\n" +
-            "Action: finish(最终答案)";
+            "Action: finish(最终答案)\n\n" +
+            "参数可以是纯文本（如 query 内容），也可以是 JSON 对象（需要多个参数时用）。\n\n" +
+            "可用的操作：\n";
 
     private final WebClient openAiWebClient;
     private final ToolRegistry toolRegistry;
@@ -58,6 +55,9 @@ public class ReactEngine {
     private final OpenAIConfig openAIConfig;
     private final Map<String, List<ReActStep>> stepCache;
     private final ObjectMapper objectMapper;
+
+    /** 当前请求的用户 ID，用于把 userId 透传给需要它的工具（如 memory_search） */
+    private final ThreadLocal<Long> currentUserId = new ThreadLocal<>();
 
     public ReactEngine(@Lazy WebClient openAiWebClient,
                        ToolRegistry toolRegistry,
@@ -76,6 +76,37 @@ public class ReactEngine {
         this.objectMapper = new ObjectMapper();
     }
 
+    /**
+     * 动态拼装 ReAct 系统提示词。
+     * <p>
+     * 修复说明：此前可用动作被<b>硬编码</b>成 search / calculate / lookup / finish
+     * 四个词写死在常量里。于是出现一个荒诞的组合：{@link ToolRegistry} 里注册了什么工具，
+     * LLM 完全不知道 —— 它只会按写死的名字去叫，注册表再丰富也永远用不上。
+     * 现在从注册表实时生成清单，注册即生效。
+     */
+    private String buildSystemPrompt() {
+        StringBuilder sb = new StringBuilder(REACT_INSTRUCTION);
+
+        List<ToolRegistry.ToolDefinition> tools = toolRegistry.listTools();
+        if (tools.isEmpty()) {
+            sb.append("- finish(answer): 给出最终答案（当前没有可用工具，请直接作答）\n");
+            return sb.toString();
+        }
+
+        for (ToolRegistry.ToolDefinition tool : tools) {
+            sb.append("- ").append(tool.getName()).append(": ")
+                    .append(tool.getDescription())
+                    .append("\n");
+        }
+
+        // 内置兜底动作：不经注册表，由本类直接实现
+        sb.append("- search(query): 搜索知识库（等价于 knowledge_search）\n");
+        sb.append("- lookup(term): 查询术语定义（等价于 knowledge_search）\n");
+        sb.append("- calculate(expression): 计算数学表达式\n");
+        sb.append("- finish(answer): 给出最终答案\n");
+        return sb.toString();
+    }
+
     // ----------------------------------------------------------------
     //  Public API
     // ----------------------------------------------------------------
@@ -91,10 +122,35 @@ public class ReactEngine {
      * @return the final answer from the ReAct loop
      */
     public String run(String query, int maxIterations) {
+        return run(query, maxIterations, null);
+    }
+
+    /**
+     * Run the ReAct loop for a given query on behalf of a specific user.
+     * <p>
+     * userId 会被透传给需要用户维度的工具（如 memory_search）。
+     * 用 ThreadLocal 是因为 ReAct 的 Action 语法里没有位置放 userId。
+     *
+     * @param query         the user query
+     * @param maxIterations maximum number of reasoning iterations
+     * @param userId        the calling user's id, may be null
+     * @return the final answer from the ReAct loop
+     */
+    public String run(String query, int maxIterations, Long userId) {
         if (query == null || query.isBlank()) {
             return "";
         }
 
+        currentUserId.set(userId);
+        try {
+            return runLoop(query, maxIterations);
+        } finally {
+            // 线程池复用线程，必须清理，否则下一个请求会继承上一个用户的身份
+            currentUserId.remove();
+        }
+    }
+
+    private String runLoop(String query, int maxIterations) {
         int iterations = Math.max(1, Math.min(maxIterations, 10));
         log.info("Starting ReAct loop: query='{}', maxIterations={}",
                 query.length() > 50 ? query.substring(0, 50) + "..." : query, iterations);
@@ -196,17 +252,18 @@ public class ReactEngine {
      */
     public String think(String query, String context) {
         try {
-            String prompt = REACT_SYSTEM_PROMPT + "\n\n" + context;
+            String systemPrompt = buildSystemPrompt();
 
-            Map<String, Object> requestBody = Map.of(
-                    "model", openAIConfig.getModel(),
-                    "messages", List.of(
-                            Map.of("role", "system", "content", REACT_SYSTEM_PROMPT),
-                            Map.of("role", "user", "content", context)
-                    ),
-                    "temperature", 0.3,
-                    "max_tokens", 1000
-            );
+            Map<String, Object> requestBody = new HashMap<>();
+            requestBody.put("model", openAIConfig.getModel());
+            requestBody.put("messages", List.of(
+                    Map.of("role", "system", "content", systemPrompt),
+                    Map.of("role", "user", "content", context)
+            ));
+            requestBody.put("temperature", 0.3);
+            requestBody.put("max_tokens", 1000);
+            // 推理过程本身不需要思维链，反而会挤占 max_tokens 让 Action 被截断
+            openAIConfig.applyThinking(requestBody);
 
             String responseStr = openAiWebClient.post()
                     .uri("/chat/completions")
@@ -254,14 +311,23 @@ public class ReactEngine {
 
         // Try tool registry first
         try {
-            Map<String, Object> paramMap = new HashMap<>();
-            if (params != null && !params.isBlank()) {
-                paramMap.put("query", params);
-            }
+            Map<String, Object> paramMap = buildToolParams(params);
 
-            Map<String, Object> toolResult = toolRegistry.executeTool(action, paramMap);
-            if (toolResult != null && toolResult.containsKey("result")) {
-                return toolResult.get("result").toString();
+            Map<String, Object> toolResult = toolRegistry.executeTool(action, paramMap, currentUserId.get());
+            if (toolResult != null) {
+                // 成功：注册表约定 handler 把可读文本放在 "result"
+                Object result = toolResult.get("result");
+                if (result != null) {
+                    return result.toString();
+                }
+                // 失败：必须把 error 透出去。
+                // 修复前这里只检查 "result"，工具执行失败（返回 error 但不带 result）
+                // 会被当成「工具不存在」直接落到下面的内置分支，
+                // 最终给 LLM 的观察结果是 "Unknown action: knowledge_search" —— 完全误导。
+                Object error = toolResult.get("error");
+                if (error != null && toolRegistry.hasTool(action)) {
+                    return "Tool [" + action + "] failed: " + error;
+                }
             }
         } catch (Exception e) {
             log.debug("Tool registry lookup failed for action [{}]: {}", action, e.getMessage());
@@ -276,8 +342,64 @@ public class ReactEngine {
             case "lookup":
                 return executeLookup(params);
             default:
-                return "Unknown action: " + action + ". Available: search, calculate, lookup, finish";
+                return "Unknown action: " + action + ". Available: " + availableActionNames();
         }
+    }
+
+    /**
+     * 把 ReAct 的「单个位置参数」适配成工具需要的参数 Map。
+     * <p>
+     * ReAct 的 Action 语法只给了一个括号里的字符串，但工具参数不止一个
+     * （如 run_code 需要 language + code + timeout）。这里做两层适配：
+     * <ol>
+     *   <li>参数以 <code>{</code> 开头 → 按 JSON 对象解析并展开，支持多参数；</li>
+     *   <li>否则作为纯文本，同时挂到 query / expression / term / code 几个常见键上，
+     *       让单参数工具（knowledge_search、calculate 等）都能取到自己要的那个名字。</li>
+     * </ol>
+     * 另外统一注入 userId（若当前请求有），供 memory_search 这类需要用户维度的工具使用。
+     */
+    private Map<String, Object> buildToolParams(String params) {
+        Map<String, Object> paramMap = new HashMap<>();
+
+        if (params != null && !params.isBlank()) {
+            String trimmed = params.trim();
+            if (trimmed.startsWith("{")) {
+                try {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> parsed = objectMapper.readValue(trimmed, Map.class);
+                    paramMap.putAll(parsed);
+                } catch (Exception e) {
+                    log.debug("Action params look like JSON but failed to parse, treating as text: {}",
+                            e.getMessage());
+                }
+            }
+
+            if (!paramMap.containsKey("query")) {
+                paramMap.put("query", params);
+            }
+            paramMap.putIfAbsent("expression", params);
+            paramMap.putIfAbsent("term", params);
+            paramMap.putIfAbsent("code", params);
+        }
+
+        if (currentUserId.get() != null) {
+            paramMap.putIfAbsent("userId", currentUserId.get());
+        }
+
+        return paramMap;
+    }
+
+    /**
+     * 列出当前真正可用的动作名，用于把「未知动作」的报错变成有用的提示。
+     */
+    private String availableActionNames() {
+        List<String> names = new java.util.ArrayList<>();
+        toolRegistry.listTools().forEach(t -> names.add(t.getName()));
+        names.add("search");
+        names.add("calculate");
+        names.add("lookup");
+        names.add("finish");
+        return String.join(", ", names);
     }
 
     /**
